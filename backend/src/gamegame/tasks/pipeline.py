@@ -1,6 +1,7 @@
 """Pipeline task for processing resources through all stages."""
 
 import logging
+import traceback
 from typing import Any
 
 from sqlmodel import select
@@ -166,8 +167,24 @@ async def process_resource(
 
         except Exception as e:
             logger.exception(f"Resource {resource_id}: Pipeline failed")
+            stack_trace = traceback.format_exc()
+
+            # Capture context about where we failed
+            current_stage = resource.processing_stage.value if resource and resource.processing_stage else None
+            extra_context = {
+                "last_stage": current_stage,
+                "state_keys": list(state.keys()) if state else [],
+            }
+
             await mark_resource_failed(session, resource_id, str(e))
-            await fail_workflow_run(session, run_id, str(e), "PIPELINE_ERROR")
+            await fail_workflow_run(
+                session,
+                run_id,
+                str(e),
+                "PIPELINE_ERROR",
+                stack_trace=stack_trace,
+                extra_context=extra_context,
+            )
             await session.commit()
             return {"status": "error", "message": str(e)}
 

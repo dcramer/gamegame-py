@@ -1,5 +1,6 @@
 """FastAPI application entrypoint."""
 
+import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -8,10 +9,26 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from gamegame.api.middleware import RequestIDMiddleware, RequestLoggingMiddleware
 from gamegame.api.router import api_router
 from gamegame.config import settings
 from gamegame.database import close_db
 from gamegame.services.bgg import close_rate_limiter
+
+logger = logging.getLogger(__name__)
+
+# Initialize Sentry for error tracking
+if settings.sentry_dsn:
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        environment=settings.environment,
+        traces_sample_rate=0.1 if settings.is_production else 1.0,
+        profiles_sample_rate=0.1 if settings.is_production else 0.0,
+        enable_tracing=True,
+    )
+    logger.info("Sentry initialized")
 
 
 @asynccontextmanager
@@ -34,13 +51,18 @@ app = FastAPI(
     openapi_url="/api/openapi.json" if settings.debug_enabled else None,
 )
 
+# Request ID middleware (must be added first to wrap other middleware)
+app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(RequestIDMiddleware)
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-ID"],
+    expose_headers=["X-Request-ID"],
 )
 
 # Include API router

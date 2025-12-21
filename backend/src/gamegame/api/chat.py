@@ -3,13 +3,19 @@
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from gamegame.api.deps import CurrentUserOptional, SessionDep
 from gamegame.api.utils import get_game_by_id_or_slug
 from gamegame.services.chat import ChatMessage, chat, chat_stream
+from gamegame.services.rate_limit import (
+    RateLimitType,
+    check_rate_limit,
+    rate_limit_headers,
+)
+from gamegame.services.resilience import CircuitOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +58,9 @@ class ChatResponseModel(BaseModel):
 async def chat_with_game(
     game_id_or_slug: str,
     request: ChatRequest,
+    http_request: Request,
     session: SessionDep,
-    _user: CurrentUserOptional,
+    user: CurrentUserOptional,
 ):
     """Chat with an AI about a game's rules.
 
@@ -68,6 +75,16 @@ async def chat_with_game(
     Returns:
         AI response with citations
     """
+    # Check rate limit
+    user_id = user.id if user else None
+    rate_limit = await check_rate_limit(http_request, RateLimitType.CHAT, user_id)
+    if not rate_limit.success:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded. Please try again later.",
+            headers=rate_limit_headers(rate_limit),
+        )
+
     game = await get_game_by_id_or_slug(game_id_or_slug, session)
 
     if not request.messages:
@@ -105,7 +122,15 @@ async def chat_with_game(
         )
 
     # Non-streaming response
-    response = await chat(session, game, messages)
+    try:
+        response = await chat(session, game, messages)
+    except CircuitOpenError:
+        logger.warning(f"Circuit breaker open for chat request on game {game.id}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service is temporarily unavailable. Please try again in a few moments.",
+            headers={"Retry-After": "30"},
+        ) from None
 
     return ChatResponseModel(
         content=response.content,

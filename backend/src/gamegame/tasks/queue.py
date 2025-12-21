@@ -1,14 +1,22 @@
 """SAQ queue configuration for background tasks."""
 
+import logging
+from typing import Any
+
 from saq import Queue
 
 from gamegame.config import settings
+
+logger = logging.getLogger(__name__)
 
 # Main task queue
 queue = Queue.from_url(settings.redis_url)
 
 # Job timeout: 30 minutes for PDF processing (can take a while for large docs)
 PIPELINE_TIMEOUT_SECONDS = 30 * 60
+
+# Track if we're shutting down gracefully
+_shutting_down = False
 
 
 def get_queue_settings() -> dict:
@@ -29,14 +37,110 @@ def get_queue_settings() -> dict:
         "concurrency": 2,  # Number of concurrent tasks
         "startup": startup,
         "shutdown": shutdown,
+        "before_process": before_process,
+        "after_process": after_process,
     }
 
 
-async def startup(_ctx: dict) -> None:
-    """Called when worker starts."""
-    pass
+async def startup(ctx: dict) -> None:
+    """Called when worker starts.
+
+    Initialize connections and resources needed by tasks.
+    """
+    logger.info("Worker starting up...")
+
+    # Initialize Sentry for error tracking in worker
+    if settings.sentry_dsn:
+        import sentry_sdk
+
+        sentry_sdk.init(
+            dsn=settings.sentry_dsn,
+            environment=settings.environment,
+            traces_sample_rate=0.1,
+        )
+        logger.info("Sentry initialized for worker")
+
+    # Verify Redis connection
+    try:
+        redis = queue.redis
+        if redis:
+            await redis.ping()
+            logger.info("Redis connection verified")
+    except Exception as e:
+        logger.error(f"Redis connection failed: {e}")
+        raise
+
+    # Store shared resources in context
+    ctx["started_at"] = __import__("time").time()
+    logger.info("Worker startup complete")
 
 
-async def shutdown(_ctx: dict) -> None:
-    """Called when worker shuts down."""
-    pass
+async def shutdown(ctx: dict) -> None:
+    """Called when worker shuts down.
+
+    Clean up connections and resources.
+    """
+    global _shutting_down  # noqa: PLW0603
+    _shutting_down = True
+
+    logger.info("Worker shutting down...")
+
+    # Log uptime
+    started_at = ctx.get("started_at")
+    if started_at:
+        uptime = __import__("time").time() - started_at
+        logger.info(f"Worker uptime: {uptime:.1f} seconds")
+
+    # Close database connections if any were opened
+    try:
+        from gamegame.database import close_db
+
+        await close_db()
+        logger.info("Database connections closed")
+    except Exception as e:
+        logger.warning(f"Error closing database: {e}")
+
+    logger.info("Worker shutdown complete")
+
+
+async def before_process(ctx: dict) -> None:
+    """Called before each task is processed."""
+    job = ctx.get("job")
+    if job:
+        logger.info(f"Starting task: {job.function} (id={job.id})")
+
+
+async def after_process(ctx: dict) -> None:
+    """Called after each task is processed."""
+    job = ctx.get("job")
+    if job:
+        status = "completed" if job.status == "complete" else job.status
+        logger.info(f"Finished task: {job.function} (id={job.id}, status={status})")
+
+
+def is_shutting_down() -> bool:
+    """Check if worker is in shutdown state.
+
+    Tasks can check this to abort gracefully during shutdown.
+    """
+    return _shutting_down
+
+
+async def enqueue(
+    function_name: str,
+    timeout: int | None = None,
+    **kwargs: Any,
+) -> str:
+    """Enqueue a task for background processing.
+
+    Args:
+        function_name: Name of the registered task function
+        timeout: Optional timeout in seconds
+        **kwargs: Arguments to pass to the task
+
+    Returns:
+        Job ID
+    """
+    job = await queue.enqueue(function_name, timeout=timeout, **kwargs)
+    logger.info(f"Enqueued task: {function_name} (id={job.id})")
+    return job.id

@@ -141,14 +141,22 @@ async def fail_workflow_run(
     run_id: str,
     error: str,
     error_code: str | None = None,
+    *,
+    stack_trace: str | None = None,
+    extra_context: dict[str, Any] | None = None,
 ) -> WorkflowRun | None:
     """Mark a workflow run as failed.
+
+    This effectively adds the job to a "dead letter queue" - failed jobs
+    are persisted with full error context for later inspection and retry.
 
     Args:
         session: Database session
         run_id: External job ID
         error: Error message
-        error_code: Optional error code
+        error_code: Optional error code (e.g., "PIPELINE_ERROR", "API_ERROR")
+        stack_trace: Optional full stack trace
+        extra_context: Optional additional context (e.g., last successful stage)
 
     Returns:
         Updated WorkflowRun or None if not found
@@ -162,9 +170,51 @@ async def fail_workflow_run(
         workflow_run.completed_at = datetime.now(UTC)
         workflow_run.error = error
         workflow_run.error_code = error_code
+
+        # Store additional failure context in extra_data
+        extra_data = workflow_run.extra_data or {}
+        if stack_trace:
+            extra_data["stack_trace"] = stack_trace
+        if extra_context:
+            extra_data["failure_context"] = extra_context
+        workflow_run.extra_data = extra_data
+
         await session.flush()
+        logger.warning(
+            f"Workflow {run_id} failed: {error_code or 'ERROR'} - {error}",
+            extra={"run_id": run_id, "error_code": error_code},
+        )
 
     return workflow_run
+
+
+async def get_failed_workflows(
+    session: AsyncSession,
+    limit: int = 50,
+    workflow_name: str | None = None,
+) -> list[WorkflowRun]:
+    """Get failed workflow runs for inspection (dead letter queue).
+
+    Args:
+        session: Database session
+        limit: Maximum number of results
+        workflow_name: Optional filter by workflow name
+
+    Returns:
+        List of failed WorkflowRun records
+    """
+    stmt = (
+        select(WorkflowRun)
+        .where(WorkflowRun.status == WorkflowStatus.FAILED)
+        .order_by(WorkflowRun.completed_at.desc())
+        .limit(limit)
+    )
+
+    if workflow_name:
+        stmt = stmt.where(WorkflowRun.workflow_name == workflow_name)
+
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
 
 
 async def get_or_create_workflow_run(

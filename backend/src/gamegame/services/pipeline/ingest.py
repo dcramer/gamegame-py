@@ -1,11 +1,29 @@
 """INGEST stage - Extract PDF content using Mistral OCR API."""
 
+import asyncio
 import base64
+import logging
 from dataclasses import dataclass, field
 
 from mistralai import Mistral
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from gamegame.config import settings
+from gamegame.services.resilience import mistral_circuit
+
+logger = logging.getLogger(__name__)
+
+# Mistral-specific retryable exceptions
+MISTRAL_RETRYABLE = (
+    asyncio.TimeoutError,
+    ConnectionError,
+    OSError,
+)
 
 
 @dataclass
@@ -59,15 +77,27 @@ async def ingest_document(
     base64_doc = base64.b64encode(document_bytes).decode("utf-8")
     document_url = f"data:{mime_type};base64,{base64_doc}"
 
-    # Call Mistral OCR API
-    result = await client.ocr.process_async(
-        model="mistral-ocr-latest",
-        document={
-            "type": "document_url",
-            "document_url": document_url,
-        },
-        include_image_base64=True,
-    )
+    # Call Mistral OCR API with retry and circuit breaker
+    async def _call_ocr():
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=30),
+            retry=retry_if_exception_type(MISTRAL_RETRYABLE),
+            reraise=True,
+        ):
+            with attempt:
+                logger.debug(f"Mistral OCR attempt {attempt.retry_state.attempt_number}")
+                return await client.ocr.process_async(
+                    model="mistral-ocr-latest",
+                    document={
+                        "type": "document_url",
+                        "document_url": document_url,
+                    },
+                    include_image_base64=True,
+                )
+        raise RuntimeError("Unreachable")  # For type checker
+
+    result = await mistral_circuit.call(_call_ocr)
 
     # Parse response into our data structures
     pages: list[ExtractedPage] = []
