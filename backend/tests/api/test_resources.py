@@ -148,3 +148,85 @@ async def test_reprocess_resource(admin_client: AuthenticatedClient, resource: R
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "queued"
+
+
+# --- Upload Resource Tests ---
+
+
+@pytest.fixture
+def pdf_content() -> bytes:
+    """Minimal valid PDF content."""
+    return b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Resources<<>>>>endobj xref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000052 00000 n \n0000000101 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF"
+
+
+@pytest.mark.asyncio
+async def test_upload_resource_anonymous_denied(client: AsyncClient, game: Game, pdf_content: bytes):
+    """Test that anonymous users cannot upload resources."""
+    response = await client.post(
+        f"/api/games/{game.id}/resources",
+        files={"file": ("rulebook.pdf", pdf_content, "application/pdf")},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_upload_resource_requires_admin(
+    authenticated_client: AuthenticatedClient, game: Game, pdf_content: bytes
+):
+    """Test that non-admin users cannot upload resources."""
+    response = await authenticated_client.post(
+        f"/api/games/{game.id}/resources",
+        files={"file": ("rulebook.pdf", pdf_content, "application/pdf")},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_upload_resource(admin_client: AuthenticatedClient, game: Game, pdf_content: bytes):
+    """Test uploading a PDF resource as admin."""
+    response = await admin_client.post(
+        f"/api/games/{game.id}/resources",
+        files={"file": ("Test-Rulebook.pdf", pdf_content, "application/pdf")},
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["name"] == "Test Rulebook"  # Derived from filename
+    assert data["original_filename"] == "Test-Rulebook.pdf"
+    assert data["status"] == "queued"
+    assert data["resource_type"] == "rulebook"
+    assert data["game_id"] == game.id
+    assert data["url"].startswith("/uploads/pdfs/")
+    assert data["fragment_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_upload_resource_invalid_file_type(admin_client: AuthenticatedClient, game: Game):
+    """Test that uploading non-PDF files is rejected."""
+    response = await admin_client.post(
+        f"/api/games/{game.id}/resources",
+        files={"file": ("image.png", b"fake image content", "image/png")},
+    )
+    assert response.status_code == 400
+    assert "Invalid file type" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_upload_resource_game_not_found(admin_client: AuthenticatedClient, pdf_content: bytes):
+    """Test uploading to non-existent game."""
+    response = await admin_client.post(
+        "/api/games/nonexistent-game/resources",
+        files={"file": ("rulebook.pdf", pdf_content, "application/pdf")},
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_upload_resource_by_slug(admin_client: AuthenticatedClient, game: Game, pdf_content: bytes):
+    """Test uploading a resource using game slug."""
+    response = await admin_client.post(
+        f"/api/games/{game.slug}/resources",
+        files={"file": ("rules.pdf", pdf_content, "application/pdf")},
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["game_id"] == game.id
