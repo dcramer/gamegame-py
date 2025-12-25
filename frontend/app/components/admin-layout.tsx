@@ -133,38 +133,40 @@ export function AdminLayout() {
     : [];
 
   return (
-    <div className="flex min-h-[calc(100vh-8rem)]">
-      {/* Sidebar */}
-      <aside className="w-64 border-r border-border p-4">
-        <nav className="space-y-6">
-          <div className="space-y-1">
-            <h4 className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              Main
-            </h4>
-            {mainNav.map((item) => (
-              <NavLink key={item.to} {...item} />
-            ))}
-          </div>
-
-          {gameNav.length > 0 && (
+    <div className="container mx-auto px-4 py-6">
+      <div className="flex gap-6 min-h-[calc(100vh-12rem)]">
+        {/* Sidebar */}
+        <aside className="w-56 shrink-0">
+          <nav className="space-y-6 sticky top-6">
             <div className="space-y-1">
               <h4 className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Current Game
+                Main
               </h4>
-              {gameNav.map((item) => (
+              {mainNav.map((item) => (
                 <NavLink key={item.to} {...item} />
               ))}
             </div>
-          )}
-        </nav>
-      </aside>
 
-      {/* Main content */}
-      <div className="flex-1 p-6">
-        <div className="mb-4">
-          <Breadcrumbs />
-        </div>
-        <Outlet />
+            {gameNav.length > 0 && (
+              <div className="space-y-1">
+                <h4 className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Current Game
+                </h4>
+                {gameNav.map((item) => (
+                  <NavLink key={item.to} {...item} />
+                ))}
+              </div>
+            )}
+          </nav>
+        </aside>
+
+        {/* Main content */}
+        <main className="flex-1 min-w-0">
+          <div className="mb-4">
+            <Breadcrumbs />
+          </div>
+          <Outlet />
+        </main>
       </div>
     </div>
   );
