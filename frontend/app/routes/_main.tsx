@@ -21,7 +21,7 @@ export default function MainLayout() {
           <Logo size="sm" />
           <nav className="flex items-center gap-6">
             <Link
-              to="/games"
+              to="/"
               className="text-muted-foreground hover:text-foreground transition-colors"
             >
               Games

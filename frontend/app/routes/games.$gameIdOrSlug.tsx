@@ -153,7 +153,7 @@ export default function GamePage({ loaderData }: Route.ComponentProps) {
               </Button>
             </Link>
           )}
-          <Link to="/games">
+          <Link to="/">
             <Button variant="ghost">
               <span className="text-2xl">✕</span>
               <span className="sr-only">Close chat</span>
