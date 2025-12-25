@@ -4,17 +4,19 @@ import type * as React from "react";
 import { cn } from "~/lib/utils";
 
 const badgeVariants = cva(
-  "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
+  "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors",
   {
     variants: {
       variant: {
-        default: "border-transparent bg-primary text-primary-foreground",
-        secondary: "border-transparent bg-secondary text-secondary-foreground",
-        destructive: "border-transparent bg-destructive text-destructive-foreground",
-        outline: "text-foreground",
-        success: "border-transparent bg-green-100 text-green-800",
-        warning: "border-transparent bg-yellow-100 text-yellow-800",
-        info: "border-transparent bg-blue-100 text-blue-800",
+        default: "bg-primary text-primary-foreground",
+        secondary: "bg-secondary text-secondary-foreground",
+        destructive: "bg-destructive text-destructive-foreground",
+        outline: "border border-input bg-background",
+        success: "bg-green-50 text-green-600 dark:bg-green-950 dark:text-green-400",
+        warning: "bg-yellow-50 text-yellow-600 dark:bg-yellow-950 dark:text-yellow-400",
+        error: "bg-red-50 text-red-500 dark:bg-red-950 dark:text-red-400",
+        info: "bg-gray-100 text-gray-700 dark:bg-gray-900 dark:text-gray-300",
+        neutral: "bg-gray-50 text-gray-600 dark:bg-gray-950 dark:text-gray-400",
       },
     },
     defaultVariants: {

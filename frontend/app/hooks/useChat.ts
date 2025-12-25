@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { ApiError, api } from "~/api/client";
-import type { Attachment, ChatMessage, Citation } from "~/api/types";
+import type { Attachment, ChatMessage, Citation, ToolCall } from "~/api/types";
 
 // Image result from tool calls
 export interface ChatImage {
@@ -59,16 +59,8 @@ type StreamEvent =
   | FinishEvent
   | ErrorEvent;
 
-// Tool call status for UI
-export interface ToolCall {
-  id: string;
-  name: string;
-  args?: Record<string, unknown>;
-  status: "running" | "completed";
-  result?: unknown;
-  durationMs?: number;
-  startTime?: number;
-}
+// Re-export ToolCall for consumers that import from this file
+export type { ToolCall } from "~/api/types";
 
 interface ChatState {
   messages: ChatMessage[];
@@ -258,10 +250,11 @@ export function useChat(gameSlug: string) {
             }
           }
 
-          // Add assistant message
+          // Add assistant message with tool calls
           const assistantMessage: ChatMessage = {
             role: "assistant",
             content: fullContent,
+            toolCalls: Array.from(toolCallsMap.values()),
           };
 
           // Deduplicate citations
@@ -289,6 +282,7 @@ export function useChat(gameSlug: string) {
             messages: [...updatedMessages, assistantMessage],
             isLoading: false,
             streamingContent: "",
+            toolCalls: [], // Clear - now stored in message
             citations: uniqueCitations,
             images: uniqueImages,
           }));

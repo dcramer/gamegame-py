@@ -1,5 +1,5 @@
 import { Check, FileText, Image, Loader2, Search } from "lucide-react";
-import type { ToolCall } from "~/hooks/useChat";
+import type { ToolCall } from "~/api/types";
 
 function getToolIcon(name: string, isActive: boolean) {
   if (isActive) {

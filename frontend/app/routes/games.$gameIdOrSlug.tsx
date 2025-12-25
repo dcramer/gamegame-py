@@ -1,28 +1,21 @@
-import { ArrowLeft, Brain, ExternalLink, Loader2, Send, Settings, X } from "lucide-react";
+import { Brain, Dices, ExternalLink, MessageCircle, Settings } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import type { Game } from "~/api/types";
-import { CitationsList, ImageGallery, MessageBubble, ToolCallsList } from "~/components/chat";
+import { ImageGallery, MessageBubble, ToolCallsList } from "~/components/chat";
 import { ErrorBoundary } from "~/components/error-boundary";
+import { Spinner } from "~/components/ui/spinner";
 import { Button } from "~/components/ui/button";
-import { Card } from "~/components/ui/card";
+import { Card, CardContent } from "~/components/ui/card";
 import { Input } from "~/components/ui/input";
-import { ScrollArea } from "~/components/ui/scroll-area";
 import { useAuth } from "~/contexts/auth";
 import { useChat } from "~/hooks/useChat";
 import type { Route } from "./+types/games.$gameIdOrSlug";
 
-const INITIAL_SUGGESTIONS = [
-  "How do I set up the game?",
-  "What are the win conditions?",
-  "Explain the turn structure",
-];
-
-const FOLLOWUP_SUGGESTIONS = [
-  "Can you give me an example?",
-  "Are there any exceptions to this rule?",
-  "What happens if...?",
-  "Show me a related diagram",
+const DEFAULT_QUESTIONS = [
+  "How does GameGame work?",
+  "Where can I find more information about this game?",
+  "How does setup work?",
 ];
 
 // SSR loader - fetch game data on server
@@ -51,6 +44,7 @@ export default function GamePage({ loaderData }: Route.ComponentProps) {
   const { game } = loaderData;
   const { isAdmin } = useAuth();
   const [inputValue, setInputValue] = useState("");
+  const [imageError, setImageError] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -62,16 +56,14 @@ export default function GamePage({ loaderData }: Route.ComponentProps) {
     isLoading: isChatLoading,
     error: chatError,
     streamingContent,
-    tokenUsage,
     sendMessage,
-    clearChat,
     dismissError,
   } = useChat(game.slug);
 
   // Scroll to bottom when messages change
   useEffect(() => {
     if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      scrollRef.current.scrollIntoView();
     }
   }, [messages, streamingContent, toolCalls, images]);
 
@@ -96,115 +88,95 @@ export default function GamePage({ loaderData }: Route.ComponentProps) {
     }
   };
 
-  const hasActiveToolCalls = toolCalls.some((tc) => tc.status === "running");
-  const showThinkingIndicator = isChatLoading && !streamingContent && !hasActiveToolCalls;
+  const showThinkingIndicator =
+    isChatLoading && !streamingContent && messages.length > 0;
 
   return (
-    <div className="container mx-auto px-4 py-8">
-      <div className="max-w-4xl mx-auto">
-        {/* Back link */}
-        <Link
-          to="/games"
-          className="inline-flex items-center gap-2 text-muted-foreground hover:text-foreground mb-4"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          Back to Games
-        </Link>
+    <div className="relative h-screen">
+      {/* Floating header */}
+      <div className="flex justify-between items-center h-16 lg:h-24 overflow-hidden absolute top-0 left-0 right-0 px-4 gap-4 border-b bg-card z-10">
+        <div className="flex items-center gap-4 overflow-hidden whitespace-nowrap">
+          <div className="w-8 h-8 lg:w-20 lg:h-20 relative flex-shrink-0">
+            {game.image_url && !imageError ? (
+              <img
+                src={game.image_url}
+                alt={game.name}
+                className="w-full h-full object-cover object-top"
+                onError={() => setImageError(true)}
+              />
+            ) : (
+              <div className="w-full h-full bg-muted flex items-center justify-center">
+                <Dices className="w-12 h-12 text-muted-foreground" />
+              </div>
+            )}
+          </div>
 
-        {/* Game header */}
-        <div className="flex items-start gap-6 mb-8">
-          {game.image_url ? (
-            <img
-              src={game.image_url}
-              alt={game.name}
-              className="w-32 h-32 object-cover rounded-lg"
-            />
-          ) : (
-            <div className="w-32 h-32 bg-muted rounded-lg flex items-center justify-center">
-              <span className="text-4xl text-muted-foreground">{game.name.charAt(0)}</span>
-            </div>
-          )}
-          <div className="flex-1">
-            <div className="flex items-center gap-3">
-              <h1 className="text-3xl font-bold">{game.name}</h1>
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-xl lg:text-3xl font-bold">{game.name}</h2>
               {game.bgg_url && (
                 <a
                   href={game.bgg_url}
                   target="_blank"
                   rel="noopener noreferrer"
+                  title={`View ${game.name} on BoardGameGeek`}
                   className="text-muted-foreground hover:text-foreground transition-colors"
-                  title="View on BoardGameGeek"
                 >
-                  <ExternalLink className="h-5 w-5" />
+                  <ExternalLink className="w-4 h-4 lg:w-5 lg:h-5" />
                 </a>
               )}
-              {isAdmin && (
-                <Link
-                  to={`/admin/games/${game.id}`}
-                  className="text-muted-foreground hover:text-foreground transition-colors"
-                  title="Edit game"
+            </div>
+            <div className="gap-4 items-center hidden lg:flex">
+              {game.year && (
+                <span className="text-muted-foreground text-sm">{game.year}</span>
+              )}
+              <p className="text-muted-foreground text-sm">
+                <Button
+                  size="sm"
+                  variant="link"
+                  onClick={() => sendMessage("What resources are you using?")}
+                  className="p-0 h-auto"
                 >
-                  <Settings className="h-5 w-5" />
-                </Link>
-              )}
+                  {game.resource_count || 0} resources
+                </Button>
+              </p>
             </div>
-            <div className="flex items-center gap-3 mb-2 text-muted-foreground">
-              {game.year && <span>{game.year}</span>}
-              {game.resource_count !== undefined && game.resource_count > 0 && (
-                <span>
-                  {game.resource_count} {game.resource_count === 1 ? "resource" : "resources"}
-                </span>
-              )}
-            </div>
-            {game.description && (
-              <p className="text-muted-foreground line-clamp-3">{game.description}</p>
-            )}
           </div>
         </div>
 
-        {/* Chat interface */}
-        <ErrorBoundary onReset={clearChat}>
-          <Card className="h-[600px] flex flex-col">
-            <div className="flex items-center justify-between border-b border-border px-4 py-3">
-              <h2 className="font-semibold">Ask about the rules</h2>
-              <div className="flex items-center gap-2">
-                {tokenUsage && (
-                  <span className="text-xs text-muted-foreground">
-                    {tokenUsage.promptTokens + tokenUsage.completionTokens} tokens
-                  </span>
-                )}
-                {messages.length > 0 && (
-                  <Button variant="ghost" size="sm" onClick={clearChat}>
-                    <X className="h-4 w-4 mr-1" />
-                    Clear
-                  </Button>
-                )}
-              </div>
-            </div>
+        <div className="flex items-center gap-1">
+          {isAdmin && (
+            <Link to={`/admin/games/${game.id}`}>
+              <Button variant="ghost" size="sm" title="Edit game">
+                <Settings className="w-5 h-5" />
+                <span className="sr-only">Edit game</span>
+              </Button>
+            </Link>
+          )}
+          <Link to="/games">
+            <Button variant="ghost">
+              <span className="text-2xl">✕</span>
+              <span className="sr-only">Close chat</span>
+            </Button>
+          </Link>
+        </div>
+      </div>
 
-            {/* Messages */}
-            <ScrollArea ref={scrollRef} className="flex-1 p-4">
-              {messages.length === 0 && !streamingContent ? (
-                <div className="h-full flex flex-col items-center justify-center text-center">
-                  <p className="text-muted-foreground mb-4">
-                    Ask any question about {game.name}'s rules!
-                  </p>
-                  <div className="flex flex-wrap gap-2 justify-center">
-                    {INITIAL_SUGGESTIONS.map((suggestion) => (
-                      <Button
-                        key={suggestion}
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleSuggestion(suggestion)}
-                        disabled={isChatLoading}
-                      >
-                        {suggestion}
-                      </Button>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-4">
+      {/* Chat card */}
+      <ErrorBoundary onReset={dismissError}>
+        <Card className="flex-1 flex absolute inset-0 max-w-full overflow-hidden w-full">
+          <CardContent className="flex-1 flex items-stretch flex-col pt-20 lg:pt-32 pb-4 px-4">
+            {/* Error display */}
+            {chatError && (
+              <div className="bg-destructive text-destructive-foreground font-bold p-2 lg:p-3 rounded mb-4">
+                {chatError}
+              </div>
+            )}
+
+            {/* Messages area */}
+            <div className="flex-1 overflow-y-auto mb-4 gap-y-4 flex flex-col">
+              {messages.length > 0 ? (
+                <>
                   {messages.map((message, i) => (
                     <MessageBubble
                       key={i}
@@ -213,11 +185,18 @@ export default function GamePage({ loaderData }: Route.ComponentProps) {
                     />
                   ))}
 
-                  {/* Tool calls indicator */}
-                  {toolCalls.length > 0 && <ToolCallsList toolCalls={toolCalls} />}
+                  {/* Tool calls for current turn (during streaming) */}
+                  {isChatLoading && toolCalls.length > 0 && (
+                    <ToolCallsList toolCalls={toolCalls} />
+                  )}
 
-                  {/* Images from tool calls */}
-                  {images.length > 0 && <ImageGallery images={images} />}
+                  {/* Thinking indicator - shows while loading, before streaming */}
+                  {showThinkingIndicator && (
+                    <div className="flex items-center gap-2 text-muted-foreground text-xs">
+                      <Brain className="w-3 h-3 animate-pulse" />
+                      <span>Thinking...</span>
+                    </div>
+                  )}
 
                   {/* Streaming content */}
                   {streamingContent && (
@@ -228,73 +207,60 @@ export default function GamePage({ loaderData }: Route.ComponentProps) {
                     />
                   )}
 
-                  {/* Thinking indicator */}
-                  {showThinkingIndicator && (
-                    <div className="flex items-center gap-2 text-muted-foreground text-sm">
-                      <Brain className="h-4 w-4 animate-pulse" />
-                      <span>Thinking...</span>
-                    </div>
-                  )}
-
-                  {/* Citations after last message */}
-                  {!isChatLoading && messages.length > 0 && <CitationsList citations={citations} />}
-
-                  {/* Follow-up suggestions after response */}
-                  {!isChatLoading && messages.length > 0 && (
-                    <div className="mt-4 pt-3 border-t border-border">
-                      <p className="text-xs text-muted-foreground mb-2 uppercase tracking-wide">
-                        Follow-up questions
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {FOLLOWUP_SUGGESTIONS.map((suggestion) => (
-                          <Button
-                            key={suggestion}
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleSuggestion(suggestion)}
-                            className="text-xs"
-                          >
-                            {suggestion}
-                          </Button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                  {/* Images from tool calls - show after response */}
+                  {!isChatLoading && images.length > 0 && <ImageGallery images={images} />}
+                </>
+              ) : (
+                <div className="flex-1 flex flex-col gap-6 items-center justify-center text-muted-foreground lg:text-lg">
+                  <Dices className="w-24 h-24" />
+                  <ul className="flex flex-col items-center gap-2 text-sm flex-wrap">
+                    {DEFAULT_QUESTIONS.map((question) => (
+                      <li key={question}>
+                        <Button
+                          variant="default"
+                          size="sm"
+                          className="whitespace-normal text-left py-2 block h-auto"
+                          onClick={() => handleSuggestion(question)}
+                        >
+                          {question}
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
-            </ScrollArea>
 
-            {/* Error display */}
-            {chatError && (
-              <div className="mx-4 mb-2 p-2 bg-destructive/10 border border-destructive rounded-md flex items-center justify-between">
-                <span className="text-sm text-destructive">{chatError}</span>
-                <Button variant="ghost" size="sm" onClick={dismissError} className="h-6 w-6 p-0">
-                  <X className="h-3 w-3" />
-                </Button>
-              </div>
-            )}
+              {isChatLoading && (
+                <div>
+                  <div className="inline-flex flex-row items-center bg-muted text-muted-foreground rounded p-2 lg:p-3">
+                    <Spinner size="sm" />
+                  </div>
+                </div>
+              )}
+
+              <div ref={scrollRef} />
+            </div>
 
             {/* Input */}
-            <form onSubmit={handleSubmit} className="border-t border-border p-4 flex gap-2">
+            <form
+              onSubmit={handleSubmit}
+              className="flex items-center gap-2 h-12"
+            >
               <Input
                 ref={inputRef}
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 placeholder={`Ask about ${game.name}...`}
-                disabled={isChatLoading}
-                className="flex-1"
+                className="bg-background text-foreground placeholder-text-muted-foreground px-3 py-3 lg:py-5 h-full lg:text-base text-lg"
               />
-              <Button type="submit" disabled={!inputValue.trim() || isChatLoading}>
-                {isChatLoading ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Send className="h-4 w-4" />
-                )}
+              <Button type="submit" disabled={isChatLoading} className="gap-2 h-full">
+                <MessageCircle className="w-5 h-5" />
+                <span className="hidden lg:inline">Ask</span>
               </Button>
             </form>
-          </Card>
-        </ErrorBoundary>
-      </div>
+          </CardContent>
+        </Card>
+      </ErrorBoundary>
     </div>
   );
 }

@@ -131,13 +131,20 @@ def _serialize_event(event: StreamEvent) -> str:
     return json.dumps(data)
 
 
-SYSTEM_PROMPT_TEMPLATE = """You are a knowledgeable expert on the rules of the board game **{game_name}**{year_part}.
+GITHUB_URL = "https://github.com/dcramer/gamegame"
+
+SYSTEM_PROMPT_TEMPLATE = """You are a knowledgeable expert on the rules of the board game **{game_name}**{year_part}, and being operated on a website called GameGame.
 
 You interpret rules based on the provided resources and give accurate, detailed explanations about gameplay, mechanics, and rule ambiguities.
 
 You assist players in understanding the game, resolving disputes, and ensuring a smooth gaming experience.
 
 Focus on being precise, clear, and neutral. Focus on gameplay rules. Be specific about rules that change based on player count or expansions. Do not advise on gameplay strategy.
+
+## Game Information
+
+You have the following information about this game:
+- **Name**: {game_name}{year_info}{bgg_info}
 
 ## Response Guidelines
 
@@ -149,6 +156,27 @@ Focus on being precise, clear, and neutral. Focus on gameplay rules. Be specific
 - If a rule is ambiguous, explain why and cite the source
 
 When you need information about the game rules, use the search_resources function to find relevant content.
+
+## Question Types
+
+### Gameplay Questions
+Questions about the game rules, setup, gameplay, or general information about the game.
+Use search_resources with appropriate limit: 2-3 for simple factual questions, 5 for complex questions.
+
+### Knowledge Questions
+Questions about the resources available to you. Use the list_resources tool to see what's available.
+
+### External Resource Questions
+Questions about where to find more information. Refer to the Game Information section above and list_resources.
+
+### GameGame Questions
+Questions about yourself or GameGame, including how you work.
+
+You and GameGame were originally created by David Cramer and is Open Source and available on GitHub at {github_url}.
+
+GameGame works as a RAG system, using embeddings to find relevant information in the knowledge base from game manuals and other resources. You only have access to the resources that have been provided.
+
+Good follow-ups to questions about yourself or GameGame are which resources are available, or where users can learn more about the game.
 """
 
 
@@ -538,9 +566,14 @@ async def _execute_tool(
 def _build_system_prompt(game: Game) -> str:
     """Build the system prompt for the chat."""
     year_part = f" ({game.year})" if game.year else ""
+    year_info = f"\n- **Year Published**: {game.year}" if game.year else ""
+    bgg_info = f"\n- **BoardGameGeek URL**: {game.bgg_url}" if game.bgg_url else ""
     return SYSTEM_PROMPT_TEMPLATE.format(
         game_name=game.name,
         year_part=year_part,
+        year_info=year_info,
+        bgg_info=bgg_info,
+        github_url=GITHUB_URL,
     )
 
 
@@ -577,7 +610,7 @@ async def chat(
         messages=openai_messages,
         tools=TOOLS,
         tool_choice="auto",
-        temperature=0.7,
+        temperature=1.0,  # GPT-5 requires temperature 1.0
     )
 
     assistant_message = response.choices[0].message
@@ -627,7 +660,7 @@ async def chat(
             messages=openai_messages,
             tools=TOOLS,
             tool_choice="auto",
-            temperature=0.7,
+            temperature=1.0,  # GPT-5 requires temperature 1.0
         )
 
         assistant_message = response.choices[0].message
@@ -691,7 +724,7 @@ async def chat_stream(
                 messages=openai_messages,
                 tools=TOOLS,
                 tool_choice="auto",
-                temperature=0.7,
+                temperature=1.0,  # GPT-5 requires temperature 1.0
                 stream=True,
                 stream_options={"include_usage": True},
             )

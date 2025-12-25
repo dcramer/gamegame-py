@@ -166,7 +166,7 @@ def storage_stats():
     asyncio.run(_stats())
 
 
-def _format_size(size: int) -> str:
+def _format_size(size: float) -> str:
     """Format bytes as human-readable size."""
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if size < 1024:

@@ -5,10 +5,17 @@ An LLM-powered board game assistant that helps players understand game rules usi
 ## Quick Start
 
 ### Prerequisites
-- Python 3.12+
-- Node.js 20+
 - Docker and Docker Compose
-- uv (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
+- [mise](https://mise.jdx.dev/) (manages Python, Node.js, and uv automatically)
+
+```bash
+# Install mise (if not already installed)
+curl https://mise.run | sh
+
+# Add to your shell (bash example, see mise docs for other shells)
+echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc
+source ~/.bashrc
+```
 
 ### Setup
 
@@ -16,33 +23,30 @@ An LLM-powered board game assistant that helps players understand game rules usi
 # 1. Clone and enter directory
 cd gamegame-py
 
-# 2. Start PostgreSQL and Redis
-docker compose up -d
+# 2. Install tools (Python 3.12, Node 20, uv) and dependencies
+mise install
 
 # 3. Configure environment variables
-cp .env.example backend/.env
+cp .env.example .env
 ```
 
-Edit `backend/.env` and add your API keys:
+Edit `.env` and add your API keys:
 ```bash
 # Required for core functionality
 OPENAI_API_KEY=sk-...              # From platform.openai.com
 MISTRAL_API_KEY=...                # From console.mistral.ai
 SESSION_SECRET=...                 # Generate: openssl rand -base64 32
-
-# Database (default works with docker-compose)
-DATABASE_URL=postgresql+asyncpg://gamegame:gamegame@localhost:5432/gamegame
 ```
 
 ```bash
-# 4. Run setup (installs deps, runs migrations)
-make setup
+# 4. Run setup (starts Docker, installs deps, runs migrations)
+mise setup
 
 # 5. Create an admin user
-make create-admin email="your-email@example.com"
+mise cli users create your-email@example.com --admin
 
 # 6. Start development servers
-make dev
+mise dev
 ```
 
 Visit:
@@ -54,30 +58,36 @@ Visit:
 
 After starting the dev server, generate a magic link:
 ```bash
-make cli cmd="users login-url your-email@example.com"
+mise cli users login-url your-email@example.com
 ```
 Click the link to sign in.
 
 ## Common Commands
 
+Run `mise tasks` to see all available commands.
+
 ### Development
 ```bash
-make dev              # Start both backend and frontend
-make backend          # Start backend only (http://localhost:8000)
-make frontend         # Start frontend only (http://localhost:5173)
-make worker           # Start background task worker
+mise dev              # Start both backend and frontend
+mise backend          # Start backend only (http://localhost:8000)
+mise frontend         # Start frontend only (http://localhost:5173)
+mise worker           # Start background task worker
 ```
 
 ### Database Management
 ```bash
-# Daily operations
-make db-reset         # Drop and recreate database (destructive!)
-make migrate          # Apply pending migrations
+mise migrate                         # Apply pending migrations
+mise migrate:create "add users table" # Create new migration
+mise migrate:down                    # Rollback last migration
+mise migrate:history                 # Show migration history
+mise db:reset                        # Drop and recreate database (destructive!)
+```
 
-# Schema changes
-make migrate-create name="add users table"  # Create new migration
-make migrate-down     # Rollback last migration
-make migrate-history  # Show migration history
+### Docker Services
+```bash
+mise up               # Start PostgreSQL and Redis
+mise down             # Stop Docker services
+mise up:test          # Start test database only
 ```
 
 ### CLI Tools
@@ -85,56 +95,33 @@ make migrate-history  # Show migration history
 The CLI handles common admin tasks:
 
 ```bash
-# User management
-make cli cmd="users create user@example.com --admin"
-make cli cmd="users grant-admin user@example.com"
-make cli cmd="users login-url user@example.com"
-
-# Game management
-make cli cmd="games list"
+mise cli users list
+mise cli users create user@example.com --admin
+mise cli users grant-admin user@example.com
+mise cli users login-url user@example.com
+mise cli games list
 ```
 
 ### Code Quality
 ```bash
-make lint             # Run Ruff linter
-make format           # Format code with Ruff
-make typecheck        # Run ty and mypy type checkers
-make check            # Run all checks (lint, typecheck, test)
+mise lint             # Run linters (Ruff + Biome)
+mise lint:fix         # Auto-fix linting issues
+mise format           # Format code (Ruff + Biome)
+mise typecheck        # Run type checkers (ty + tsc)
+mise check            # Run all checks (lint, typecheck, test)
 ```
 
 ### Testing
 ```bash
-make test             # Run all tests
-make test-cov         # Run tests with coverage report
-make test-api         # Run API tests only
-make test-services    # Run service tests only
-
-# Test database runs on port 5433 (separate from dev)
-make up-test          # Start test database
+mise test             # Run all tests
+mise test:cov         # Run tests with coverage report
+mise test:api         # Run API tests only
+mise test:services    # Run service tests only
 ```
-
-### Claude Code Development
-
-For AI-assisted development with browser testing:
-
-```bash
-# Install Playwright skill for browser automation
-git clone https://github.com/lackeyjb/playwright-skill.git ~/.claude/skills/playwright-skill
-cd ~/.claude/skills/playwright-skill/skills/playwright-skill
-npm run setup
-
-# Install system dependencies (Ubuntu/Debian/WSL)
-sudo apt-get install -y libnss3 libnspr4 libasound2t64 libatk1.0-0 \
-  libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
-  libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2
-```
-
-Claude Code can then run browser tests against the dev server automatically.
 
 ## Documentation
 
-- **[AGENTS.md](./AGENTS.md)** - Complete architecture, development guide, and AI assistant context
-- **[SCAFFOLDING_PLAN.md](./SCAFFOLDING_PLAN.md)** - Migration plan and technology decisions
+- **[CLAUDE.md](./CLAUDE.md)** - Complete architecture, development guide, and AI assistant context
 
 ## Tech Stack
 
@@ -145,7 +132,7 @@ Claude Code can then run browser tests against the dev server automatically.
 - **Migrations**: Alembic
 - **Task Queue**: SAQ (Redis-based async tasks)
 - **Package Manager**: uv
-- **Type Checking**: ty + mypy
+- **Type Checking**: ty
 - **Linting**: Ruff
 
 ### Frontend
@@ -212,8 +199,8 @@ gamegame-py/
 │   └── public/               # Static assets
 │
 ├── docker-compose.yml        # PostgreSQL + Redis
-├── Makefile                  # Development commands
-└── AGENTS.md                 # AI agent guidance
+├── mise.toml                 # Development tasks and tool versions
+└── CLAUDE.md                 # AI agent guidance
 ```
 
 ## Troubleshooting
@@ -224,8 +211,8 @@ gamegame-py/
 lsof -i :5432
 
 # Reset Docker containers
-docker compose down
-docker compose up -d
+mise down
+mise up
 ```
 
 ### Migrations fail
@@ -234,22 +221,34 @@ docker compose up -d
 docker compose ps
 
 # Reset database and re-run migrations
-make db-reset
+mise db:reset
 ```
 
 ### Import errors
 ```bash
 # Reinstall dependencies
-cd backend && uv sync --all-extras
+mise install
 ```
 
 ### Tests fail with database errors
 ```bash
 # Ensure test database is running
-make up-test
+mise up:test
 
 # Run migrations on test database
 cd backend && DATABASE_URL=$DATABASE_URL_TEST uv run alembic upgrade head
+```
+
+### mise not found after install
+```bash
+# Ensure mise is activated in your shell
+# For bash:
+echo 'eval "$(~/.local/bin/mise activate bash)"' >> ~/.bashrc
+source ~/.bashrc
+
+# For zsh:
+echo 'eval "$(~/.local/bin/mise activate zsh)"' >> ~/.zshrc
+source ~/.zshrc
 ```
 
 ## License

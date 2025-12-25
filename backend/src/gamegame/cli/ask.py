@@ -65,7 +65,7 @@ class ChatClient:
 
         full_response = ""
         current_text = ""
-        citations: list[dict] = {}
+        citations: dict[str, dict] = {}
         usage = {}
         tool_timings: list[dict] = []
         current_tool_start: float | None = None

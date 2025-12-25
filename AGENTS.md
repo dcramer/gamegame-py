@@ -17,47 +17,50 @@ GameGame is an LLM-powered board game assistant that helps players understand ga
 
 ## Development Commands
 
+This project uses [mise](https://mise.jdx.dev/) for task running and tool version management.
+Run `mise tasks` to see all available commands.
+
 ### Setup
 ```bash
-make setup                    # Install deps, start Docker, run migrations
-docker compose up -d          # Start PostgreSQL + Redis
+mise install                  # Install Python, Node, uv (first time only)
+mise setup                    # Install deps, start Docker, run migrations
 ```
 
 ### Running the Application
 ```bash
-make dev                      # Start both backend and frontend
-make backend                  # Backend only (http://localhost:8000)
-make frontend                 # Frontend only (http://localhost:5173)
-make worker                   # Background task worker
+mise dev                      # Start both backend and frontend
+mise backend                  # Backend only (http://localhost:8000)
+mise frontend                 # Frontend only (http://localhost:5173)
+mise worker                   # Background task worker
 ```
 
 ### Database Operations
 ```bash
-make migrate                  # Apply migrations
-make migrate-create name="description"  # Generate new migration
-make migrate-down             # Rollback last migration
-make db-reset                 # Drop and recreate database (destructive!)
+mise migrate                  # Apply migrations
+mise migrate:create "description"  # Generate new migration
+mise migrate:down             # Rollback last migration
+mise migrate:history          # Show migration history
+mise db:reset                 # Drop and recreate database (destructive!)
 ```
 
 ### Code Quality
 ```bash
-make lint                     # Run Ruff linter
-make format                   # Format with Ruff
-make typecheck                # Run ty and mypy
-make check                    # All checks (lint, typecheck, test)
+mise lint                     # Run Ruff + Biome linters
+mise lint:fix                 # Auto-fix linting issues
+mise format                   # Format with Ruff + Biome
+mise typecheck                # Run ty + tsc
+mise check                    # All checks (lint, typecheck, test)
 ```
 
 ### CLI Commands
 
 The CLI is built with Typer. Run commands via:
 ```bash
-make cli cmd="<command>"
-
-# Examples:
-make cli cmd="users create user@example.com --admin"
-make cli cmd="users grant-admin user@example.com"
-make cli cmd="users login-url user@example.com"
-make cli cmd="games list"
+mise cli users list
+mise cli users create user@example.com --admin
+mise cli users grant-admin user@example.com
+mise cli users login-url user@example.com
+mise cli games list
 ```
 
 Or directly:
@@ -68,10 +71,10 @@ cd backend && uv run gamegame games create "Game Name" --slug game-name
 
 ### Testing
 ```bash
-make test                     # Run all tests
-make test-cov                 # With coverage report
-make test-api                 # API tests only
-make test-services            # Service tests only
+mise test                     # Run all tests
+mise test:cov                 # With coverage report
+mise test:api                 # API tests only
+mise test:services            # Service tests only
 ```
 
 **Test Philosophy**: Only mock external APIs (OpenAI, Mistral). Use real local services (PostgreSQL, Redis).

@@ -92,3 +92,6 @@ frontend/.react-router/
 # But ignore others
 poetry.lock
 Pipfile.lock
+
+# mise local overrides
+.mise.local.toml

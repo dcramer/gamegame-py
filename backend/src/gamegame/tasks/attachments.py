@@ -153,4 +153,4 @@ async def analyze_attachment(
 
 
 # Set SAQ job timeout
-analyze_attachment.timeout = ATTACHMENT_TIMEOUT_SECONDS
+analyze_attachment.timeout = ATTACHMENT_TIMEOUT_SECONDS  # type: ignore[attr-defined]

@@ -154,7 +154,7 @@ async def with_retry(
     min_wait: float = 1.0,
     max_wait: float = 10.0,
     **kwargs: P.kwargs,
-) -> T:
+) -> T:  # type: ignore[return-value]
     """Execute an async function with exponential backoff retry.
 
     Args:
@@ -204,7 +204,7 @@ def with_resilience(
         @wraps(func)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
             async def wrapped() -> T:
-                return await with_retry(func, *args, max_attempts=max_retries, **kwargs)
+                return await with_retry(func, *args, max_attempts=max_retries, **kwargs)  # type: ignore[arg-type]
 
             if circuit_breaker:
                 return await circuit_breaker.call(wrapped)

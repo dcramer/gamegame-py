@@ -39,7 +39,7 @@ async def health_check_db(session: SessionDep):
 async def health_check_redis():
     """Health check for Redis connectivity (task queue)."""
     try:
-        redis = queue.redis
+        redis = queue.redis  # type: ignore[attr-defined]
         if redis is None:
             return JSONResponse(
                 status_code=503,
@@ -75,7 +75,7 @@ async def readiness_check(session: SessionDep):
 
     # Check Redis
     try:
-        redis = queue.redis
+        redis = queue.redis  # type: ignore[attr-defined]
         if redis is None:
             redis_status = "not_initialized"
             errors["redis"] = "Redis client not initialized"

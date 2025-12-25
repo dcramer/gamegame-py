@@ -1,7 +1,9 @@
+import React from "react";
 import Markdown from "react-markdown";
 import type { ChatMessage, Citation } from "~/api/types";
 import { Badge } from "~/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "~/components/ui/tooltip";
+import { ToolCallsList } from "./tool-call";
 
 interface CitationLinkProps {
   number: number;
@@ -77,24 +79,49 @@ export function MessageBubble({ message, citations = [], isStreaming }: MessageB
     });
   };
 
+  // Extract text from React children (handles nested elements)
+  const getTextContent = (children: React.ReactNode): string => {
+    if (typeof children === "string") return children;
+    if (typeof children === "number") return String(children);
+    if (!children) return "";
+    if (Array.isArray(children)) {
+      return children.map(getTextContent).join("");
+    }
+    // Handle React elements with children
+    if (React.isValidElement(children) && children.props) {
+      const props = children.props as { children?: React.ReactNode };
+      if (props.children) {
+        return getTextContent(props.children);
+      }
+    }
+    return "";
+  };
+
   return (
-    <div className="flex justify-start">
-      <div className="max-w-[85%] rounded-lg px-4 py-2 bg-muted text-foreground">
-        <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-headings:my-2">
-          <Markdown
-            components={{
-              p: ({ children }) => <p>{processContent(String(children))}</p>,
-              li: ({ children }) => <li>{processContent(String(children))}</li>,
-              h1: ({ children }) => <h1>{processContent(String(children))}</h1>,
-              h2: ({ children }) => <h2>{processContent(String(children))}</h2>,
-              h3: ({ children }) => <h3>{processContent(String(children))}</h3>,
-              h4: ({ children }) => <h4>{processContent(String(children))}</h4>,
-            }}
-          >
-            {message.content}
-          </Markdown>
+    <div className="flex flex-col gap-2">
+      {/* Render tool calls above the message content */}
+      {message.toolCalls && message.toolCalls.length > 0 && (
+        <ToolCallsList toolCalls={message.toolCalls} />
+      )}
+
+      <div className="flex justify-start">
+        <div className="max-w-[85%] rounded-lg px-4 py-2 bg-muted text-foreground">
+          <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-headings:my-2">
+            <Markdown
+              components={{
+                p: ({ children }) => <p>{processContent(getTextContent(children))}</p>,
+                li: ({ children }) => <li>{processContent(getTextContent(children))}</li>,
+                h1: ({ children }) => <h1>{processContent(getTextContent(children))}</h1>,
+                h2: ({ children }) => <h2>{processContent(getTextContent(children))}</h2>,
+                h3: ({ children }) => <h3>{processContent(getTextContent(children))}</h3>,
+                h4: ({ children }) => <h4>{processContent(getTextContent(children))}</h4>,
+              }}
+            >
+              {message.content}
+            </Markdown>
+          </div>
+          {isStreaming && <span className="inline-block w-2 h-4 bg-current animate-pulse ml-1" />}
         </div>
-        {isStreaming && <span className="inline-block w-2 h-4 bg-current animate-pulse ml-1" />}
       </div>
     </div>
   );

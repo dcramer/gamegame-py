@@ -1,6 +1,5 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { isRouteErrorResponse, Links, Meta, Scripts, ScrollRestoration } from "react-router";
-import { Layout as AppLayout } from "~/components/layout";
+import { isRouteErrorResponse, Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
 import { AuthProvider } from "~/contexts/auth";
 import { ToastContextProvider } from "~/contexts/toast";
 import { queryClient } from "~/lib/query";
@@ -20,15 +19,21 @@ export function meta() {
 
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className="dark">
       <head>
         <meta charSet="UTF-8" />
         <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@300..700&display=swap"
+          rel="stylesheet"
+        />
         <Meta />
         <Links />
       </head>
-      <body>
+      <body className="font-comfortaa">
         {children}
         <ScrollRestoration />
         <Scripts />
@@ -42,7 +47,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <ToastContextProvider>
         <AuthProvider>
-          <AppLayout />
+          <Outlet />
         </AuthProvider>
       </ToastContextProvider>
     </QueryClientProvider>

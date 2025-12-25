@@ -460,4 +460,4 @@ async def _stage_embed(
 
 
 # Set SAQ job timeout (15 minutes for large PDFs)
-process_resource.timeout = PIPELINE_TIMEOUT_SECONDS
+process_resource.timeout = PIPELINE_TIMEOUT_SECONDS  # type: ignore[attr-defined]

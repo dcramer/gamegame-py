@@ -144,9 +144,20 @@ export interface TokenResponse {
 // Chat Types
 // ============================================================================
 
+export interface ToolCall {
+  id: string;
+  name: string;
+  args?: Record<string, unknown>;
+  status: "running" | "completed";
+  result?: unknown;
+  durationMs?: number;
+  startTime?: number;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  toolCalls?: ToolCall[];
 }
 
 export interface Citation {

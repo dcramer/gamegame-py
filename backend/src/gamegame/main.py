@@ -52,12 +52,12 @@ app = FastAPI(
 )
 
 # Request ID middleware (must be added first to wrap other middleware)
-app.add_middleware(RequestLoggingMiddleware)
-app.add_middleware(RequestIDMiddleware)
+app.add_middleware(RequestLoggingMiddleware)  # type: ignore[arg-type]
+app.add_middleware(RequestIDMiddleware)  # type: ignore[arg-type]
 
 # CORS middleware
 app.add_middleware(
-    CORSMiddleware,
+    CORSMiddleware,  # type: ignore[arg-type]
     allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],

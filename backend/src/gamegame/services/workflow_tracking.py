@@ -206,7 +206,7 @@ async def get_failed_workflows(
     stmt = (
         select(WorkflowRun)
         .where(WorkflowRun.status == WorkflowStatus.FAILED)
-        .order_by(WorkflowRun.completed_at.desc())
+        .order_by(WorkflowRun.completed_at.desc())  # type: ignore[attr-defined]
         .limit(limit)
     )
 

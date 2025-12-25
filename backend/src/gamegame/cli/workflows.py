@@ -56,7 +56,7 @@ def list_workflows(
 
     async def _list():
         async with get_session_context() as session:
-            stmt = select(WorkflowRun).order_by(WorkflowRun.created_at.desc()).limit(limit)
+            stmt = select(WorkflowRun).order_by(WorkflowRun.created_at.desc()).limit(limit)  # type: ignore[attr-defined]
 
             # Filter by game
             if game:

@@ -62,7 +62,7 @@ async def startup(ctx: dict) -> None:
 
     # Verify Redis connection
     try:
-        redis = queue.redis
+        redis = queue.redis  # type: ignore[attr-defined]
         if redis:
             await redis.ping()
             logger.info("Redis connection verified")
@@ -142,5 +142,7 @@ async def enqueue(
         Job ID
     """
     job = await queue.enqueue(function_name, timeout=timeout, **kwargs)
+    if job is None:
+        raise RuntimeError(f"Failed to enqueue task: {function_name}")
     logger.info(f"Enqueued task: {function_name} (id={job.id})")
     return job.id

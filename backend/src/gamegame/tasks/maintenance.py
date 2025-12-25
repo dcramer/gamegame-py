@@ -164,9 +164,9 @@ async def prune_workflow_runs(
             # Count runs that would be deleted
             count_stmt = (
                 select(WorkflowRun)
-                .where(WorkflowRun.created_at < cutoff_date)
+                .where(WorkflowRun.created_at < cutoff_date)  # type: ignore[arg-type]
                 .where(
-                    WorkflowRun.status.in_(
+                    WorkflowRun.status.in_(  # type: ignore[attr-defined]
                         [WorkflowStatus.COMPLETED, WorkflowStatus.FAILED, WorkflowStatus.CANCELLED]
                     )
                 )
@@ -181,9 +181,9 @@ async def prune_workflow_runs(
             if not dry_run and delete_count > 0:
                 delete_stmt = (
                     delete(WorkflowRun)
-                    .where(WorkflowRun.created_at < cutoff_date)
+                    .where(WorkflowRun.created_at < cutoff_date)  # type: ignore[arg-type]
                     .where(
-                        WorkflowRun.status.in_(
+                        WorkflowRun.status.in_(  # type: ignore[attr-defined]
                             [WorkflowStatus.COMPLETED, WorkflowStatus.FAILED, WorkflowStatus.CANCELLED]
                         )
                     )
@@ -217,5 +217,5 @@ async def prune_workflow_runs(
 
 
 # Set SAQ job timeouts
-cleanup_orphaned_blobs.timeout = MAINTENANCE_TIMEOUT_SECONDS
-prune_workflow_runs.timeout = MAINTENANCE_TIMEOUT_SECONDS
+cleanup_orphaned_blobs.timeout = MAINTENANCE_TIMEOUT_SECONDS  # type: ignore[attr-defined]
+prune_workflow_runs.timeout = MAINTENANCE_TIMEOUT_SECONDS  # type: ignore[attr-defined]

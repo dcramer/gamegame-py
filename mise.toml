@@ -1,0 +1,209 @@
+# mise.toml - Development environment and task runner
+# Install mise: curl https://mise.run | sh
+# Then run: mise install && mise run setup
+
+min_version = "2024.0.0"
+
+[tools]
+python = "3.12"
+node = "20"
+uv = "latest"
+
+[env]
+_.file = ".env"
+PYTHONDONTWRITEBYTECODE = "1"
+
+# =============================================================================
+# Setup & Development
+# =============================================================================
+
+[tasks.setup]
+description = "Initial project setup (install deps, start Docker, run migrations)"
+run = """
+#!/usr/bin/env bash
+set -e
+
+echo "Starting Docker services..."
+docker compose up -d
+
+echo "Installing backend dependencies..."
+cd backend && uv sync --all-extras
+
+echo "Installing frontend dependencies..."
+cd frontend && npm install
+
+echo "Running database migrations..."
+cd backend && uv run alembic upgrade head
+
+echo ""
+echo "Setup complete! Run 'mise dev' to start development servers."
+"""
+
+[tasks.dev]
+description = "Start frontend and backend servers"
+run = "overmind start -f Procfile.dev 2>/dev/null || honcho start -f Procfile.dev"
+
+[tasks.backend]
+description = "Start backend server only"
+dir = "backend"
+run = "uv run uvicorn gamegame.main:app --reload --port 8000"
+
+[tasks.frontend]
+description = "Start frontend server only"
+dir = "frontend"
+run = "npm run dev"
+
+[tasks.worker]
+description = "Start background task worker"
+dir = "backend"
+run = "uv run python -m gamegame.worker"
+
+# =============================================================================
+# Database
+# =============================================================================
+
+[tasks.migrate]
+alias = "db:migrate"
+description = "Run database migrations"
+dir = "backend"
+run = "uv run alembic upgrade head"
+
+[tasks."migrate:create"]
+alias = "db:migrate:create"
+description = "Create a new migration"
+dir = "backend"
+run = "uv run alembic revision --autogenerate -m \"$1\""
+
+[tasks."migrate:down"]
+alias = "db:migrate:down"
+description = "Rollback last migration"
+dir = "backend"
+run = "uv run alembic downgrade -1"
+
+[tasks."migrate:history"]
+alias = "db:migrate:history"
+description = "Show migration history"
+dir = "backend"
+run = "uv run alembic history"
+
+[tasks."db:reset"]
+description = "Reset database (destructive!)"
+dir = "backend"
+run = "uv run alembic downgrade base && uv run alembic upgrade head"
+
+# =============================================================================
+# Docker
+# =============================================================================
+
+[tasks.up]
+description = "Start Docker services (PostgreSQL, Redis)"
+run = "docker compose up -d"
+
+[tasks.down]
+description = "Stop Docker services"
+run = "docker compose down"
+
+[tasks."up:test"]
+description = "Start test database"
+run = "docker compose up -d postgres-test"
+
+# =============================================================================
+# Code Quality
+# =============================================================================
+
+[tasks.lint]
+description = "Run linters (backend + frontend)"
+run = [
+    "cd backend && uv run ruff check .",
+    "cd frontend && npm run lint"
+]
+
+[tasks."lint:fix"]
+description = "Fix linting issues"
+run = [
+    "cd backend && uv run ruff check --fix .",
+    "cd frontend && npm run lint:fix"
+]
+
+[tasks.format]
+description = "Format code (backend + frontend)"
+run = [
+    "cd backend && uv run ruff format .",
+    "cd frontend && npm run format"
+]
+
+[tasks.typecheck]
+description = "Run type checkers"
+run = [
+    "cd backend && uv run ty check",
+    "cd frontend && npm run typecheck"
+]
+
+[tasks.check]
+description = "Run all checks (lint, typecheck, test)"
+depends = ["lint", "typecheck", "test"]
+
+# =============================================================================
+# Testing
+# =============================================================================
+
+[tasks.test]
+description = "Run all tests"
+dir = "backend"
+run = "uv run pytest"
+
+[tasks."test:cov"]
+description = "Run tests with coverage"
+dir = "backend"
+run = "uv run pytest --cov --cov-report=term-missing"
+
+[tasks."test:api"]
+description = "Run API tests only"
+dir = "backend"
+run = "uv run pytest tests/api/"
+
+[tasks."test:services"]
+description = "Run service tests only"
+dir = "backend"
+run = "uv run pytest tests/services/"
+
+# =============================================================================
+# CLI Shortcuts
+# =============================================================================
+
+[tasks.cli]
+description = "Run CLI command (e.g., mise cli users list)"
+dir = "backend"
+run = "uv run gamegame"
+
+[tasks."users:create"]
+description = "Create a user (usage: mise users:create email@example.com --admin)"
+dir = "backend"
+run = "uv run gamegame users create"
+
+[tasks."users:login-url"]
+description = "Generate login URL for a user"
+dir = "backend"
+run = "uv run gamegame users login-url"
+
+# =============================================================================
+# Utilities
+# =============================================================================
+
+[tasks.clean]
+description = "Clean build artifacts and caches"
+run = """
+find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+find . -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
+find . -type d -name .ruff_cache -exec rm -rf {} + 2>/dev/null || true
+find . -type d -name .mypy_cache -exec rm -rf {} + 2>/dev/null || true
+rm -rf frontend/build frontend/.react-router 2>/dev/null || true
+echo "Cleaned build artifacts"
+"""
+
+[tasks.install]
+description = "Install all dependencies"
+run = [
+    "cd backend && uv sync --all-extras",
+    "cd frontend && npm install"
+]

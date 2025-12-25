@@ -473,7 +473,7 @@ Generate exactly {num_questions} questions, one per line. Questions only, no num
             model=get_model("hyde"),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=400,
-            temperature=0.7,
+            temperature=1.0,  # GPT-5 requires temperature 1.0
         )
 
         text = response.choices[0].message.content or ""

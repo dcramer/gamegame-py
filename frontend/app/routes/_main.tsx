@@ -1,5 +1,6 @@
 import { LogOut, Settings, User } from "lucide-react";
 import { Link, Outlet } from "react-router";
+import { Logo } from "~/components/logo";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
@@ -10,16 +11,14 @@ import {
 } from "~/components/ui/dropdown-menu";
 import { useAuth } from "~/contexts/auth";
 
-export function Layout() {
+export default function MainLayout() {
   const { user, isAuthenticated, isAdmin, logout } = useAuth();
 
   return (
     <div className="min-h-screen flex flex-col">
       <header className="border-b border-border">
         <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <Link to="/" className="text-xl font-bold">
-            GameGame
-          </Link>
+          <Logo size="sm" />
           <nav className="flex items-center gap-6">
             <Link
               to="/games"

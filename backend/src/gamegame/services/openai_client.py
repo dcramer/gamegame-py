@@ -41,7 +41,7 @@ def get_openai_client() -> AsyncOpenAI:
 async def create_chat_completion(
     messages: list[dict[str, Any]],
     model: str = "gpt-4o-mini",
-    temperature: float = 0.7,
+    temperature: float = 1.0,  # GPT-5 requires temperature 1.0
     max_tokens: int | None = None,
     **kwargs: Any,
 ) -> ChatCompletion:
@@ -86,7 +86,7 @@ async def create_chat_completion(
 async def create_chat_completion_stream(
     messages: list[dict[str, Any]],
     model: str = "gpt-4o-mini",
-    temperature: float = 0.7,
+    temperature: float = 1.0,  # GPT-5 requires temperature 1.0
     max_tokens: int | None = None,
     **kwargs: Any,
 ) -> AsyncIterator[ChatCompletionChunk]:

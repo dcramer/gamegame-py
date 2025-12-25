@@ -48,9 +48,9 @@ def list_resources(
     async def _list():
         async with get_session_context() as session:
             stmt = (
-                select(Resource, Game.name.label("game_name"))
+                select(Resource, Game.name.label("game_name"))  # type: ignore[attr-defined]
                 .join(Game, Resource.game_id == Game.id)
-                .order_by(Resource.created_at.desc())
+                .order_by(Resource.created_at.desc())  # type: ignore[attr-defined]
                 .limit(limit)
             )
 
@@ -189,7 +189,7 @@ def resource_status(
     async def _status():
         async with get_session_context() as session:
             stmt = (
-                select(Resource, Game.name.label("game_name"))
+                select(Resource, Game.name.label("game_name"))  # type: ignore[attr-defined]
                 .join(Game, Resource.game_id == Game.id)
                 .where(Resource.id == resource_id)
             )

@@ -191,7 +191,7 @@ def get_client_ip(request: Request) -> str | None:
 
 def get_identifier(
     ip: str | None,
-    user_id: int | None = None,
+    user_id: str | None = None,
 ) -> str:
     """Get identifier for rate limiting.
 
@@ -205,7 +205,7 @@ def get_identifier(
 async def check_rate_limit(
     request: Request,
     limit_type: RateLimitType,
-    user_id: int | None = None,
+    user_id: str | None = None,
 ) -> RateLimitResult:
     """Check rate limit for a request.
 
