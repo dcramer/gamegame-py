@@ -133,8 +133,8 @@ export function AdminLayout() {
     : [];
 
   return (
-    <div className="container mx-auto px-4 py-6">
-      <div className="flex gap-6 min-h-[calc(100vh-12rem)]">
+    <div className="container py-6">
+      <div className="flex gap-8 min-h-[calc(100vh-12rem)]">
         {/* Sidebar */}
         <aside className="w-56 shrink-0">
           <nav className="space-y-6 sticky top-6">
@@ -161,8 +161,8 @@ export function AdminLayout() {
         </aside>
 
         {/* Main content */}
-        <main className="flex-1 min-w-0">
-          <div className="mb-4">
+        <main className="flex-1 min-w-0 pb-6">
+          <div className="mb-6">
             <Breadcrumbs />
           </div>
           <Outlet />

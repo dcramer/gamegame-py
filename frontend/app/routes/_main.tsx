@@ -1,5 +1,5 @@
-import { LogOut, Settings, User } from "lucide-react";
-import { Link, Outlet } from "react-router";
+import { Dices, Github, LogOut, Settings, User } from "lucide-react";
+import { Link, Outlet, useLocation } from "react-router";
 import { Logo } from "~/components/logo";
 import { Button } from "~/components/ui/button";
 import {
@@ -11,13 +11,17 @@ import {
 } from "~/components/ui/dropdown-menu";
 import { useAuth } from "~/contexts/auth";
 
+const GITHUB_URL = "https://github.com/dcramer/gamegame";
+
 export default function MainLayout() {
   const { user, isAuthenticated, isAdmin, logout } = useAuth();
+  const location = useLocation();
+  const isOnAdminPage = location.pathname.startsWith("/admin");
 
   return (
     <div className="min-h-screen flex flex-col">
       <header className="border-b border-border">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
+        <div className="container py-4 flex items-center justify-between">
           <Logo size="sm" />
           <nav className="flex items-center gap-6">
             <Link
@@ -74,9 +78,30 @@ export default function MainLayout() {
         <Outlet />
       </main>
 
-      <footer className="border-t border-border py-6">
-        <div className="container mx-auto px-4 text-center text-sm text-muted-foreground">
-          <p>GameGame - AI-powered board game rules assistant</p>
+      <footer className="container py-8 text-center text-muted-foreground font-mono text-xs">
+        <div className="flex justify-center items-center gap-4">
+          <a
+            href={GITHUB_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1 hover:underline"
+          >
+            <Github className="w-4 h-4" />
+            GitHub
+          </a>
+          <span>&middot;</span>
+          <Link to="/" className="flex items-center gap-1 hover:underline">
+            <Dices className="w-4 h-4" />
+            GameGame
+          </Link>
+          {isOnAdminPage && (
+            <>
+              <span>&middot;</span>
+              <Link to="/admin" className="hover:underline">
+                Admin
+              </Link>
+            </>
+          )}
         </div>
       </footer>
     </div>
