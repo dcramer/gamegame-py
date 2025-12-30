@@ -106,6 +106,12 @@ export interface WorkflowRun {
   extra_data: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+  // Computed fields from backend
+  progress_percent: number | null;
+  stage_label: string | null;
+  resource_name: string | null;
+  retry_count: number;
+  can_retry: boolean;
 }
 
 export interface BggGame {
@@ -231,6 +237,13 @@ export interface BggSearchResult {
 export interface UploadResponse {
   resource: Resource;
   message: string;
+}
+
+export interface FileUploadResponse {
+  url: string;
+  blob_key: string;
+  size: number;
+  mime_type: string;
 }
 
 // ============================================================================

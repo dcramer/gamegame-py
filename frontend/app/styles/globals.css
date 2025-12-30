@@ -45,6 +45,7 @@
   /* Animations */
   --animate-accordion-down: accordion-down 0.2s ease-out;
   --animate-accordion-up: accordion-up 0.2s ease-out;
+  --animate-progress-indeterminate: progress-indeterminate 1.5s ease-in-out infinite;
 }
 
 @keyframes accordion-down {
@@ -65,8 +66,17 @@
   }
 }
 
+@keyframes progress-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
+}
+
 .dark {
-  --color-background: oklch(0% 0 0);
+  --color-background: oklch(10% 0 0);
   --color-foreground: oklch(98% 0 0);
   --color-card: oklch(8% 0 0);
   --color-card-foreground: oklch(98% 0 0);

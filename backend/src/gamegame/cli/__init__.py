@@ -3,6 +3,7 @@
 import typer
 
 from gamegame.cli.ask import app as ask_app
+from gamegame.cli.attachments import app as attachments_app
 from gamegame.cli.bgg import app as bgg_app
 from gamegame.cli.db import app as db_app
 from gamegame.cli.games import app as games_app
@@ -19,6 +20,7 @@ app.add_typer(db_app, name="db")
 app.add_typer(users_app, name="users")
 app.add_typer(games_app, name="games")
 app.add_typer(resources_app, name="resources")
+app.add_typer(attachments_app, name="attachments")
 app.add_typer(bgg_app, name="bgg")
 app.add_typer(search_app, name="search")
 app.add_typer(workflows_app, name="workflows")

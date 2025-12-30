@@ -139,7 +139,7 @@ Format: {{ "answerTypes": ["type1", "type2", ...] }}"""
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=1,  # GPT-5/GPT-4o-mini requires temperature 1
-            max_tokens=100,
+            max_completion_tokens=100,
         )
 
         content = response.choices[0].message.content
@@ -198,7 +198,7 @@ Content:
 Return ONLY a number between 0-100, nothing else."""
                 }],
                 temperature=1,  # GPT-5/GPT-4o-mini requires temperature 1
-                max_tokens=10,
+                max_completion_tokens=10,
             )
 
             score_text = response.choices[0].message.content or "0"

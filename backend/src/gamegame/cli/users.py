@@ -111,6 +111,13 @@ def login_url(email: str = typer.Argument(..., help="User email")):
                 console.print(f"[red]Error:[/red] User {email} not found")
                 raise typer.Exit(1)
 
+            # Delete any existing token for this email
+            existing_token_stmt = select(VerificationToken).where(VerificationToken.identifier == email)
+            existing_result = await session.execute(existing_token_stmt)
+            existing_token = existing_result.scalar_one_or_none()
+            if existing_token:
+                await session.delete(existing_token)
+
             # Generate token
             token = token_hex(32)
             expires = datetime.now(UTC) + timedelta(minutes=settings.magic_link_expiration_minutes)
@@ -123,7 +130,10 @@ def login_url(email: str = typer.Argument(..., help="User email")):
             session.add(verification)
             await session.commit()
 
-            console.print(f"[green]Login URL:[/green] /auth/verify?token={token}")
+            url = f"{settings.app_url}/auth/verify?token={token}"
+            console.print("[green]Login URL:[/green]")
+            # Print URL on its own line to make it easy to copy
+            print(url)
             console.print(f"[dim]Expires: {expires}[/dim]")
 
     asyncio.run(_generate())

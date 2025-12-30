@@ -22,7 +22,8 @@ export function useAttachmentsByResource(
   return {
     attachments: query.data ?? [],
     isLoading: query.isLoading,
-    error: query.error?.message ?? null,
+    error: query.error ?? null,
+    isFetching: query.isFetching,
     refetch: query.refetch,
   };
 }
@@ -37,7 +38,8 @@ export function useAttachmentsByGame(gameId: string | undefined, options?: UseAt
   return {
     attachments: query.data ?? [],
     isLoading: query.isLoading,
-    error: query.error?.message ?? null,
+    error: query.error ?? null,
+    isFetching: query.isFetching,
     refetch: query.refetch,
   };
 }
@@ -52,7 +54,8 @@ export function useAttachment(id: string | undefined) {
   return {
     attachment: query.data ?? null,
     isLoading: query.isLoading,
-    error: query.error?.message ?? null,
+    error: query.error ?? null,
+    isFetching: query.isFetching,
     refetch: query.refetch,
   };
 }

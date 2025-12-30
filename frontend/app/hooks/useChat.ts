@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api } from "~/api/client";
 import type { Attachment, ChatMessage, Citation, ToolCall } from "~/api/types";
 
@@ -85,7 +85,7 @@ function getToolLabel(name: string, args?: Record<string, unknown>): string {
     case "list_resources":
       return "Checking available resources";
     case "get_attachment":
-      return `Loading image`;
+      return "Loading image";
     default:
       return name;
   }
@@ -104,9 +104,23 @@ export function useChat(gameSlug: string) {
   });
   const abortControllerRef = useRef<AbortController | null>(null);
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
   const sendMessage = useCallback(
     async (content: string, useStreaming: boolean = true) => {
       if (!content.trim() || state.isLoading) return;
+
+      // Abort any existing request
+      abortControllerRef.current?.abort();
+
+      // Create new abort controller for this request
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
 
       // Add user message
       const userMessage: ChatMessage = { role: "user", content: content.trim() };
@@ -131,9 +145,14 @@ export function useChat(gameSlug: string) {
           const extractedCitations: Citation[] = [];
           const extractedImages: ChatImage[] = [];
 
-          const stream = api.chat.stream(gameSlug, updatedMessages);
+          const stream = api.chat.stream(gameSlug, updatedMessages, abortController.signal);
 
           for await (const eventStr of stream) {
+            // Check if aborted
+            if (abortController.signal.aborted) {
+              return;
+            }
+
             // Parse the JSON event
             let event: StreamEvent;
             try {
@@ -303,6 +322,15 @@ export function useChat(gameSlug: string) {
           }));
         }
       } catch (err) {
+        // Ignore abort errors - they're expected when user cancels
+        if (err instanceof Error && err.name === "AbortError") {
+          setState((prev) => ({
+            ...prev,
+            isLoading: false,
+          }));
+          return;
+        }
+
         const errorMessage =
           err instanceof ApiError
             ? err.message
@@ -321,7 +349,10 @@ export function useChat(gameSlug: string) {
   );
 
   const clearChat = useCallback(() => {
+    // Abort any in-flight request
     abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+
     setState({
       messages: [],
       citations: [],

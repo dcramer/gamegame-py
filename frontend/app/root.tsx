@@ -1,7 +1,15 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { isRouteErrorResponse, Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
+import {
+  isRouteErrorResponse,
+  Links,
+  Meta,
+  Outlet,
+  Scripts,
+  ScrollRestoration,
+} from "react-router";
 import { AuthProvider } from "~/contexts/auth";
 import { ToastContextProvider } from "~/contexts/toast";
+import { WorkflowTrackingProvider } from "~/contexts/workflow-tracking";
 import { queryClient } from "~/lib/query";
 import type { Route } from "./+types/root";
 
@@ -46,9 +54,11 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <ToastContextProvider>
-        <AuthProvider>
-          <Outlet />
-        </AuthProvider>
+        <WorkflowTrackingProvider>
+          <AuthProvider>
+            <Outlet />
+          </AuthProvider>
+        </WorkflowTrackingProvider>
       </ToastContextProvider>
     </QueryClientProvider>
   );

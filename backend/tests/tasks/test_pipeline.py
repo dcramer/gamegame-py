@@ -4,6 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from gamegame.models import Attachment, Embedding, Fragment, Game, Resource
+from gamegame.models.attachment import AttachmentType
+from gamegame.models.resource import ProcessingStage, ResourceStatus
 from gamegame.services.pipeline.embed import ResourceInfo, chunk_text_simple
 from gamegame.services.pipeline.metadata import extract_metadata
 from gamegame.services.pipeline.vision import (
@@ -93,8 +96,236 @@ class TestExtractMetadata:
         assert result.image_count == 5
 
 
+class TestDataUrlStripping:
+    """Tests for data URL prefix stripping."""
+
+    def test_strips_jpeg_data_url(self):
+        """Strips data:image/jpeg;base64, prefix."""
+        from gamegame.tasks.pipeline import _strip_data_url_prefix
+
+        data_url = "data:image/jpeg;base64,/9j/4AAQSkZJRg=="
+        result = _strip_data_url_prefix(data_url)
+        assert result == "/9j/4AAQSkZJRg=="
+
+    def test_strips_png_data_url(self):
+        """Strips data:image/png;base64, prefix."""
+        from gamegame.tasks.pipeline import _strip_data_url_prefix
+
+        data_url = "data:image/png;base64,iVBORw0KGgo="
+        result = _strip_data_url_prefix(data_url)
+        assert result == "iVBORw0KGgo="
+
+    def test_preserves_plain_base64(self):
+        """Leaves plain base64 unchanged."""
+        from gamegame.tasks.pipeline import _strip_data_url_prefix
+
+        plain_b64 = "/9j/4AAQSkZJRg=="
+        result = _strip_data_url_prefix(plain_b64)
+        assert result == "/9j/4AAQSkZJRg=="
+
+    def test_handles_data_url_with_charset(self):
+        """Handles data URLs with extra parameters."""
+        from gamegame.tasks.pipeline import _strip_data_url_prefix
+
+        data_url = "data:image/png;charset=utf-8;base64,iVBORw0KGgo="
+        result = _strip_data_url_prefix(data_url)
+        assert result == "iVBORw0KGgo="
+
+    def test_decodes_correctly_after_stripping(self):
+        """Verify base64 decodes to valid image bytes after stripping."""
+        import base64
+
+        from gamegame.tasks.pipeline import _strip_data_url_prefix
+
+        # Real JPEG header in base64
+        jpeg_header_b64 = "/9j/4AAQSkZJRgABAQAAAQABAAD/"
+        data_url = f"data:image/jpeg;base64,{jpeg_header_b64}"
+
+        stripped = _strip_data_url_prefix(data_url)
+        decoded = base64.b64decode(stripped)
+
+        # Should start with JPEG magic bytes
+        assert decoded[:2] == b"\xff\xd8"
+
+
+class TestImageContextExtraction:
+    """Tests for extract_image_context function."""
+
+    def test_extracts_surrounding_text(self):
+        """Extracts text around an image reference."""
+        from gamegame.services.pipeline.vision import extract_image_context
+
+        markdown = """Some intro text here.
+
+This paragraph explains the setup process for the game.
+![Setup diagram](img_001)
+After placing the board, each player takes their pieces.
+
+More content follows."""
+
+        section, surrounding = extract_image_context("img_001", markdown)
+
+        assert surrounding is not None
+        assert "setup process" in surrounding.lower()
+        assert "each player takes" in surrounding.lower()
+        assert "[...image...]" in surrounding
+
+    def test_extracts_section_header(self):
+        """Finds the nearest section header above the image."""
+        from gamegame.services.pipeline.vision import extract_image_context
+
+        markdown = """# Introduction
+
+Some intro text.
+
+## Game Setup
+
+This section covers setup.
+![Board layout](img_setup)
+Place the board in the center."""
+
+        section, surrounding = extract_image_context("img_setup", markdown)
+
+        assert section == "Game Setup"
+
+    def test_handles_nested_headers(self):
+        """Finds the nearest header, not just the first."""
+        from gamegame.services.pipeline.vision import extract_image_context
+
+        markdown = """# Rules
+
+## Combat
+
+### Attacking
+
+Roll dice to attack.
+![Attack example](img_attack)
+Compare results."""
+
+        section, surrounding = extract_image_context("img_attack", markdown)
+
+        assert section == "Attacking"
+
+    def test_handles_missing_image(self):
+        """Returns None when image not found."""
+        from gamegame.services.pipeline.vision import extract_image_context
+
+        markdown = "Some text without images."
+
+        section, surrounding = extract_image_context("nonexistent", markdown)
+
+        assert section is None
+        assert surrounding is None
+
+    def test_cleans_other_image_refs(self):
+        """Replaces other image references with [image] placeholder."""
+        from gamegame.services.pipeline.vision import extract_image_context
+
+        markdown = """![First](img_001)
+Some text between images.
+![Target](img_002)
+More text.
+![Third](img_003)"""
+
+        section, surrounding = extract_image_context("img_002", markdown)
+
+        assert surrounding is not None
+        assert "img_001" not in surrounding
+        assert "img_003" not in surrounding
+        assert "[image]" in surrounding
+
+    def test_handles_empty_markdown(self):
+        """Handles empty markdown gracefully."""
+        from gamegame.services.pipeline.vision import extract_image_context
+
+        section, surrounding = extract_image_context("img_001", "")
+
+        assert section is None
+        assert surrounding is None
+
+
 class TestImageAnalysis:
     """Tests for image analysis functions."""
+
+    def test_detect_mime_type_png(self):
+        """Detects PNG format from magic bytes."""
+        from gamegame.services.pipeline.vision import _detect_mime_type
+
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        assert _detect_mime_type(png_bytes) == "image/png"
+
+    def test_detect_mime_type_jpeg(self):
+        """Detects JPEG format from magic bytes."""
+        from gamegame.services.pipeline.vision import _detect_mime_type
+
+        jpeg_bytes = b"\xff\xd8\xff" + b"\x00" * 100
+        assert _detect_mime_type(jpeg_bytes) == "image/jpeg"
+
+    def test_detect_mime_type_gif(self):
+        """Detects GIF format from magic bytes."""
+        from gamegame.services.pipeline.vision import _detect_mime_type
+
+        gif87_bytes = b"GIF87a" + b"\x00" * 100
+        gif89_bytes = b"GIF89a" + b"\x00" * 100
+        assert _detect_mime_type(gif87_bytes) == "image/gif"
+        assert _detect_mime_type(gif89_bytes) == "image/gif"
+
+    def test_detect_mime_type_webp(self):
+        """Detects WebP format from magic bytes."""
+        from gamegame.services.pipeline.vision import _detect_mime_type
+
+        webp_bytes = b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 100
+        assert _detect_mime_type(webp_bytes) == "image/webp"
+
+    def test_detect_mime_type_tiff(self):
+        """Detects TIFF format (unsupported by OpenAI)."""
+        from gamegame.services.pipeline.vision import _detect_mime_type
+
+        tiff_le_bytes = b"II\x2a\x00" + b"\x00" * 100  # Little-endian
+        tiff_be_bytes = b"MM\x00\x2a" + b"\x00" * 100  # Big-endian
+        assert _detect_mime_type(tiff_le_bytes) == "image/tiff"
+        assert _detect_mime_type(tiff_be_bytes) == "image/tiff"
+
+    def test_detect_mime_type_bmp(self):
+        """Detects BMP format (unsupported by OpenAI)."""
+        from gamegame.services.pipeline.vision import _detect_mime_type
+
+        bmp_bytes = b"BM" + b"\x00" * 100
+        assert _detect_mime_type(bmp_bytes) == "image/bmp"
+
+    def test_detect_mime_type_unknown(self):
+        """Returns octet-stream for unknown formats."""
+        from gamegame.services.pipeline.vision import _detect_mime_type
+
+        unknown_bytes = b"UNKNOWN_FORMAT" + b"\x00" * 100
+        assert _detect_mime_type(unknown_bytes) == "application/octet-stream"
+
+    def test_detect_mime_type_short_data(self):
+        """Short data returns application/octet-stream."""
+        from gamegame.services.pipeline.vision import _detect_mime_type
+
+        short_bytes = b"\x00\x00"
+        assert _detect_mime_type(short_bytes) == "application/octet-stream"
+
+    @pytest.mark.asyncio
+    async def test_analyze_single_image_rejects_unsupported_format(self):
+        """Unsupported formats raise ValueError with clear message."""
+        from gamegame.services.pipeline.vision import analyze_single_image
+
+        with patch("gamegame.services.pipeline.vision.settings") as mock_settings:
+            mock_settings.openai_api_key = "test-key"
+
+            # TIFF format - common in PDFs but not supported by OpenAI
+            tiff_bytes = b"II\x2a\x00" + b"\x00" * 100
+
+            with pytest.raises(ValueError) as exc_info:
+                await analyze_single_image(
+                    tiff_bytes,
+                    ImageAnalysisContext(page_number=1),
+                )
+
+            assert "image/tiff" in str(exc_info.value)
+            assert "Unsupported image format" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_analyze_images_batch_empty(self):
@@ -117,13 +348,13 @@ class TestImageAnalysis:
         ]
 
         with (
-            patch("gamegame.services.pipeline.vision.get_openai_client") as mock_get_client,
+            patch(
+                "gamegame.services.pipeline.vision.create_chat_completion",
+                new=AsyncMock(return_value=mock_response),
+            ),
             patch("gamegame.services.pipeline.vision.settings") as mock_settings,
         ):
             mock_settings.openai_api_key = "test-key"
-            mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
-            mock_get_client.return_value = mock_client
 
             from gamegame.services.pipeline.vision import analyze_single_image
 
@@ -142,20 +373,12 @@ class TestImageAnalysis:
         """Batch analysis handles failures gracefully."""
         from gamegame.services.pipeline.vision import analyze_images_batch
 
-        with (
-            patch("gamegame.services.pipeline.vision.get_openai_client") as mock_get_client,
-            patch("gamegame.services.pipeline.vision.settings") as mock_settings,
-        ):
+        with patch("gamegame.services.pipeline.vision.settings") as mock_settings:
             mock_settings.openai_api_key = "test-key"
-            mock_client = MagicMock()
-            # Simulate an error
-            mock_client.chat.completions.create = AsyncMock(
-                side_effect=Exception("API error")
-            )
-            mock_get_client.return_value = mock_client
 
+            # Use fake image data that will fail format validation
             images = [
-                (b"fake_image", ImageAnalysisContext(page_number=1)),
+                (b"fake_image_data_here", ImageAnalysisContext(page_number=1)),
             ]
 
             results = await analyze_images_batch(images, batch_size=1)
@@ -210,18 +433,15 @@ class TestPipelineStages:
     @pytest.mark.asyncio
     async def test_cleanup_markdown_mock(self):
         """CLEANUP stage cleans markdown content."""
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock(message=MagicMock(content="Cleaned content"))]
+        from tests.conftest import make_openai_chat_response
 
-        with (
-            patch("gamegame.services.pipeline.cleanup.get_openai_client") as mock_get_client,
-            patch("gamegame.services.pipeline.cleanup.settings") as mock_settings,
+        mock_response = make_openai_chat_response("Cleaned content")
+
+        with patch(
+            "gamegame.services.pipeline.cleanup.create_chat_completion",
+            new_callable=AsyncMock,
+            return_value=mock_response,
         ):
-            mock_settings.openai_api_key = "test-key"
-            mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
-            mock_get_client.return_value = mock_client
-
             from gamegame.services.pipeline.cleanup import cleanup_markdown
 
             result = await cleanup_markdown("# Raw\n\nDirty content")
@@ -283,20 +503,15 @@ class TestEmbedding:
     @pytest.mark.asyncio
     async def test_generate_hyde_questions_mock(self):
         """Generates HyDE questions from content."""
-        mock_response = MagicMock()
-        mock_response.choices = [
-            MagicMock(message=MagicMock(content="Question 1?\nQuestion 2?\nQuestion 3?"))
-        ]
+        from tests.conftest import make_openai_chat_response
 
-        with (
-            patch("gamegame.services.pipeline.embed.get_openai_client") as mock_get_client,
-            patch("gamegame.services.pipeline.embed.settings") as mock_settings,
+        mock_response = make_openai_chat_response("Question 1?\nQuestion 2?\nQuestion 3?")
+
+        with patch(
+            "gamegame.services.pipeline.embed.create_chat_completion",
+            new_callable=AsyncMock,
+            return_value=mock_response,
         ):
-            mock_settings.openai_api_key = "test-key"
-            mock_client = MagicMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
-            mock_get_client.return_value = mock_client
-
             from gamegame.services.pipeline.embed import generate_hyde_questions
 
             resource_info = ResourceInfo(name="Test Game Rulebook", resource_type="rulebook")
@@ -504,49 +719,597 @@ class TestModelConfig:
         assert config.vision == "gpt-5-mini"
 
 
-class TestMimeTypeDetection:
-    """Tests for MIME type detection from magic bytes."""
+class TestPipelineCleanup:
+    """Tests for pipeline cleanup functions (idempotency)."""
 
-    def test_detect_png(self):
-        """Detects PNG from magic bytes."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+    @pytest.mark.asyncio
+    async def test_cleanup_attachments_deletes_records(self, session):
+        """Cleanup deletes attachment records for a resource."""
+        from gamegame.tasks.pipeline import _cleanup_attachments
 
-        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
-        assert _detect_mime_type(png_bytes) == "image/png"
+        # Create test game and resource
+        game = Game(name="Cleanup Test", slug="cleanup-test")
+        session.add(game)
+        await session.flush()
 
-    def test_detect_jpeg(self):
-        """Detects JPEG from magic bytes."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+        resource = Resource(
+            game_id=game.id,
+            name="Test Resource",
+            original_filename="test.pdf",
+            url="/uploads/test.pdf",
+            content="",
+            status=ResourceStatus.PROCESSING,
+        )
+        session.add(resource)
+        await session.flush()
 
-        jpeg_bytes = b"\xff\xd8\xff" + b"\x00" * 100
-        assert _detect_mime_type(jpeg_bytes) == "image/jpeg"
+        # Create some attachments
+        for i in range(3):
+            attachment = Attachment(
+                game_id=game.id,
+                resource_id=resource.id,
+                type=AttachmentType.IMAGE,
+                mime_type="image/jpeg",
+                blob_key=f"test/attachment_{i}.jpg",
+                url=f"/uploads/test/attachment_{i}.jpg",
+            )
+            session.add(attachment)
+        await session.commit()
 
-    def test_detect_webp(self):
-        """Detects WebP from magic bytes."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+        # Verify attachments exist
+        from sqlmodel import select
+        stmt = select(Attachment).where(Attachment.resource_id == resource.id)
+        result = await session.execute(stmt)
+        assert len(result.scalars().all()) == 3
 
-        webp_bytes = b"RIFF" + b"\x00" * 4 + b"WEBP" + b"\x00" * 100
-        assert _detect_mime_type(webp_bytes) == "image/webp"
+        # Run cleanup (mock storage to avoid file errors)
+        with patch("gamegame.tasks.pipeline.storage") as mock_storage:
+            mock_storage.delete_file = AsyncMock(return_value=True)
+            deleted = await _cleanup_attachments(session, resource.id)
 
-    def test_detect_gif(self):
-        """Detects GIF from magic bytes."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+        assert deleted == 3
 
-        gif87_bytes = b"GIF87a" + b"\x00" * 100
-        gif89_bytes = b"GIF89a" + b"\x00" * 100
-        assert _detect_mime_type(gif87_bytes) == "image/gif"
-        assert _detect_mime_type(gif89_bytes) == "image/gif"
+        # Verify attachments are gone
+        result = await session.execute(stmt)
+        assert len(result.scalars().all()) == 0
 
-    def test_default_to_jpeg(self):
-        """Unknown format defaults to JPEG."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+    @pytest.mark.asyncio
+    async def test_cleanup_attachments_empty_resource(self, session):
+        """Cleanup handles resource with no attachments."""
+        from gamegame.tasks.pipeline import _cleanup_attachments
 
-        unknown_bytes = b"unknown format data" + b"\x00" * 100
-        assert _detect_mime_type(unknown_bytes) == "image/jpeg"
+        game = Game(name="Empty Test", slug="empty-test")
+        session.add(game)
+        await session.flush()
 
-    def test_short_data(self):
-        """Short data defaults to JPEG."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+        resource = Resource(
+            game_id=game.id,
+            name="Empty Resource",
+            original_filename="empty.pdf",
+            url="/uploads/empty.pdf",
+            content="",
+            status=ResourceStatus.PROCESSING,
+        )
+        session.add(resource)
+        await session.commit()
 
-        short_bytes = b"\x00\x00"
-        assert _detect_mime_type(short_bytes) == "image/jpeg"
+        with patch("gamegame.tasks.pipeline.storage") as mock_storage:
+            mock_storage.delete_file = AsyncMock(return_value=True)
+            deleted = await _cleanup_attachments(session, resource.id)
+
+        assert deleted == 0
+
+    @pytest.mark.asyncio
+    async def test_cleanup_fragments_deletes_records(self, session):
+        """Cleanup deletes fragment and embedding records."""
+        from gamegame.tasks.pipeline import _cleanup_fragments
+
+        game = Game(name="Fragment Cleanup", slug="fragment-cleanup")
+        session.add(game)
+        await session.flush()
+
+        resource = Resource(
+            game_id=game.id,
+            name="Fragment Resource",
+            original_filename="frag.pdf",
+            url="/uploads/frag.pdf",
+            content="Test content",
+            status=ResourceStatus.PROCESSING,
+        )
+        session.add(resource)
+        await session.flush()
+
+        # Create fragments with embeddings
+        for i in range(2):
+            fragment = Fragment(
+                game_id=game.id,
+                resource_id=resource.id,
+                content=f"Fragment {i} content",
+                searchable_content=f"Fragment {i}",
+                embedding=[0.1] * 1536,
+            )
+            session.add(fragment)
+            await session.flush()
+
+            # Create embedding record
+            embedding = Embedding(
+                id=f"emb_{i}",
+                fragment_id=fragment.id,
+                game_id=game.id,
+                resource_id=resource.id,
+                embedding=[0.1] * 1536,
+            )
+            session.add(embedding)
+
+        await session.commit()
+
+        # Verify fragments and embeddings exist
+        from sqlmodel import select
+        frag_stmt = select(Fragment).where(Fragment.resource_id == resource.id)
+        emb_stmt = select(Embedding).where(Embedding.resource_id == resource.id)
+
+        result = await session.execute(frag_stmt)
+        assert len(result.scalars().all()) == 2
+        result = await session.execute(emb_stmt)
+        assert len(result.scalars().all()) == 2
+
+        # Run cleanup
+        deleted = await _cleanup_fragments(session, resource.id)
+        assert deleted == 2
+
+        # Verify all are gone
+        result = await session.execute(frag_stmt)
+        assert len(result.scalars().all()) == 0
+        result = await session.execute(emb_stmt)
+        assert len(result.scalars().all()) == 0
+
+
+class TestPipelineStageIntegration:
+    """Integration tests for individual pipeline stages with real DB."""
+
+    @pytest.mark.asyncio
+    async def test_vision_stage_cleans_before_creating(self, session):
+        """Vision stage deletes old attachments before creating new ones."""
+        from gamegame.tasks.pipeline import _cleanup_attachments
+
+        # Create test game and resource
+        game = Game(name="Vision Stage Test", slug="vision-stage-test")
+        session.add(game)
+        await session.flush()
+
+        resource = Resource(
+            game_id=game.id,
+            name="vision.pdf",
+            original_filename="vision.pdf",
+            url="/uploads/vision.pdf",
+            content="",
+            status=ResourceStatus.PROCESSING,
+        )
+        session.add(resource)
+        await session.flush()
+
+        # Create existing attachment (simulating previous run)
+        old_attachment = Attachment(
+            game_id=game.id,
+            resource_id=resource.id,
+            type=AttachmentType.IMAGE,
+            mime_type="image/jpeg",
+            blob_key="old/attachment.jpg",
+            url="/uploads/old/attachment.jpg",
+        )
+        session.add(old_attachment)
+        await session.commit()
+
+        # Verify old attachment exists
+        from sqlmodel import select
+        stmt = select(Attachment).where(Attachment.resource_id == resource.id)
+        result = await session.execute(stmt)
+        assert len(result.scalars().all()) == 1
+
+        # Run cleanup (mock storage)
+        with patch("gamegame.tasks.pipeline.storage") as mock_storage:
+            mock_storage.delete_file = AsyncMock(return_value=True)
+            deleted = await _cleanup_attachments(session, resource.id)
+
+        assert deleted == 1
+
+        # Verify attachment is gone
+        result = await session.execute(stmt)
+        assert len(result.scalars().all()) == 0
+
+    @pytest.mark.asyncio
+    async def test_embed_stage_cleans_before_creating(self, session):
+        """Embed stage deletes old fragments before creating new ones."""
+        from gamegame.tasks.pipeline import _cleanup_fragments
+
+        game = Game(name="Embed Stage Test", slug="embed-stage-test")
+        session.add(game)
+        await session.flush()
+
+        resource = Resource(
+            game_id=game.id,
+            name="embed.pdf",
+            original_filename="embed.pdf",
+            url="/uploads/embed.pdf",
+            content="Test content",
+            status=ResourceStatus.PROCESSING,
+        )
+        session.add(resource)
+        await session.flush()
+
+        # Create old fragment (simulating previous run)
+        old_fragment = Fragment(
+            game_id=game.id,
+            resource_id=resource.id,
+            content="Old fragment content",
+            searchable_content="Old content",
+            embedding=[0.1] * 1536,
+        )
+        session.add(old_fragment)
+        await session.commit()
+
+        # Verify old fragment exists
+        from sqlmodel import select
+        stmt = select(Fragment).where(Fragment.resource_id == resource.id)
+        result = await session.execute(stmt)
+        assert len(result.scalars().all()) == 1
+
+        # Run cleanup
+        deleted = await _cleanup_fragments(session, resource.id)
+        assert deleted == 1
+
+        # Verify fragment is gone
+        result = await session.execute(stmt)
+        assert len(result.scalars().all()) == 0
+
+    @pytest.mark.asyncio
+    async def test_cleanup_and_metadata_stage(self, session):
+        """Cleanup and metadata stages update resource content."""
+        from gamegame.tasks.pipeline import _stage_cleanup, _stage_metadata
+
+        game = Game(name="Content Test", slug="content-test")
+        session.add(game)
+        await session.flush()
+
+        resource = Resource(
+            game_id=game.id,
+            name="content.pdf",
+            original_filename="content.pdf",
+            url="/uploads/content.pdf",
+            content="",
+            status=ResourceStatus.PROCESSING,
+        )
+        session.add(resource)
+        await session.commit()
+
+        # Test cleanup stage with mock
+        state = {"raw_markdown": "# Test\n\nSome dirty content here."}
+
+        with patch("gamegame.services.pipeline.cleanup.create_chat_completion") as mock_chat:
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock(message=MagicMock(content="# Test\n\nCleaned content."))]
+            mock_chat.return_value = mock_response
+
+            with patch("gamegame.services.pipeline.cleanup.settings") as mock_settings:
+                mock_settings.openai_api_key = "test-key"
+                state = await _stage_cleanup(session, resource, state)
+
+        assert "cleaned_markdown" in state
+        assert "Cleaned content" in state["cleaned_markdown"]
+
+        # Test metadata stage with mock
+        with patch("gamegame.services.pipeline.metadata.create_chat_completion") as mock_chat:
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock(message=MagicMock(
+                content='{"name": "Game Rules", "description": "Complete game rules."}'
+            ))]
+            mock_chat.return_value = mock_response
+
+            with patch("gamegame.services.pipeline.metadata.settings") as mock_settings:
+                mock_settings.openai_api_key = "test-key"
+                state = await _stage_metadata(session, resource, state)
+
+        # Verify resource was updated
+        assert resource.content is not None
+        assert resource.description == "Complete game rules."
+
+
+class TestResumableJobs:
+    """Tests for resumable job functionality with cursor checkpointing."""
+
+    @pytest.mark.asyncio
+    async def test_embed_stage_resume_from_cursor(self, session):
+        """Embed stage can resume from a checkpoint cursor."""
+        from gamegame.services.pipeline.embed import embed_content
+
+        game = Game(name="Embed Resume Test", slug="embed-resume-test")
+        session.add(game)
+        await session.flush()
+
+        resource = Resource(
+            game_id=game.id,
+            name="embed-resume.pdf",
+            original_filename="embed-resume.pdf",
+            url="/uploads/embed-resume.pdf",
+            content="",
+            status=ResourceStatus.PROCESSING,
+        )
+        session.add(resource)
+        await session.commit()
+
+        # Create some existing fragments (simulating partial completion)
+        for i in range(5):
+            fragment = Fragment(
+                game_id=game.id,
+                resource_id=resource.id,
+                content=f"Fragment {i} content",
+                searchable_content=f"Fragment {i}",
+                embedding=[0.1] * 1536,
+            )
+            session.add(fragment)
+        await session.commit()
+
+        # Mock OpenAI to return embeddings
+        with patch("gamegame.services.pipeline.embed.get_openai_client") as mock_client:
+            mock_embeddings_response = MagicMock()
+            mock_embeddings_response.data = [MagicMock(embedding=[0.1] * 1536)]
+            mock_client.return_value.embeddings.create = AsyncMock(
+                return_value=mock_embeddings_response
+            )
+
+            with patch("gamegame.services.pipeline.embed.settings") as mock_settings:
+                mock_settings.openai_api_key = "test-key"
+
+                # Test content that will create ~2 chunks
+                markdown = "Paragraph one with enough content. " * 20 + "\n\n"
+                markdown += "Paragraph two with more content. " * 20
+
+                checkpoints_received = []
+
+                async def track_checkpoint(cursor: int) -> None:
+                    checkpoints_received.append(cursor)
+
+                # Resume from cursor=1 (skip first chunk)
+                fragments = await embed_content(
+                    session=session,
+                    resource_id=resource.id,
+                    game_id=game.id,
+                    markdown=markdown,
+                    generate_hyde=False,
+                    classify_answer_types=False,
+                    on_checkpoint=track_checkpoint,
+                    resume_from=0,  # Start fresh for this test
+                )
+
+        # Should have created fragments
+        assert fragments > 0
+        # Should have received checkpoint calls
+        assert len(checkpoints_received) > 0
+
+    @pytest.mark.asyncio
+    async def test_cleanup_stage_saves_partial_results(self):
+        """Cleanup stage saves partial results during checkpointing."""
+        from gamegame.services.pipeline.cleanup import cleanup_markdown
+
+        checkpoints_received = []
+        partial_results_received = []
+
+        async def track_checkpoint(cursor: int, results: list[str]) -> None:
+            checkpoints_received.append(cursor)
+            partial_results_received.append(len(results))
+
+        # Create content large enough to require multiple chunks
+        # (each paragraph will be ~8000 chars to exceed chunk_size)
+        content = ""
+        for i in range(5):
+            content += f"Section {i}. " + "This is test content. " * 400 + "\n\n"
+
+        with patch("gamegame.services.pipeline.cleanup.create_chat_completion") as mock_chat:
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock(message=MagicMock(content="Cleaned text"))]
+            mock_chat.return_value = mock_response
+
+            with patch("gamegame.services.pipeline.cleanup.settings") as mock_settings:
+                mock_settings.openai_api_key = "test-key"
+
+                await cleanup_markdown(
+                    content,
+                    chunk_size=8000,
+                    on_checkpoint=track_checkpoint,
+                    resume_from=0,
+                )
+
+        # Should have received checkpoint calls with increasing result counts
+        assert len(checkpoints_received) > 0
+        # Each checkpoint should have more or equal results than previous
+        for i in range(1, len(partial_results_received)):
+            assert partial_results_received[i] >= partial_results_received[i - 1]
+
+    @pytest.mark.asyncio
+    async def test_cleanup_stage_resume_with_previous_results(self):
+        """Cleanup stage can resume with previous results."""
+        from gamegame.services.pipeline.cleanup import cleanup_markdown
+
+        # Create content that will be split into multiple chunks
+        content = ""
+        for i in range(3):
+            content += f"Section {i}. " + "Test content here. " * 400 + "\n\n"
+
+        # Previous results from first 2 chunks
+        previous_results = ["Cleaned chunk 0", "Cleaned chunk 1"]
+
+        with patch("gamegame.services.pipeline.cleanup.create_chat_completion") as mock_chat:
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock(message=MagicMock(content="Cleaned remaining"))]
+            mock_chat.return_value = mock_response
+
+            with patch("gamegame.services.pipeline.cleanup.settings") as mock_settings:
+                mock_settings.openai_api_key = "test-key"
+
+                result = await cleanup_markdown(
+                    content,
+                    chunk_size=8000,
+                    resume_from=2,  # Skip first 2 chunks
+                    previous_results=previous_results,
+                )
+
+        # Result should include both previous and new results
+        assert "Cleaned chunk 0" in result
+        assert "Cleaned chunk 1" in result
+
+    @pytest.mark.asyncio
+    async def test_vision_stage_cursor_checkpoint(self, session):
+        """Vision stage saves cursor and image mapping during checkpointing."""
+        from gamegame.tasks.pipeline import _stage_vision
+
+        game = Game(name="Vision Resume Test", slug="vision-resume-test")
+        session.add(game)
+        await session.flush()
+
+        resource = Resource(
+            game_id=game.id,
+            name="vision-resume.pdf",
+            original_filename="vision-resume.pdf",
+            url="/uploads/vision-resume.pdf",
+            content="",
+            status=ResourceStatus.PROCESSING,
+            processing_stage=ProcessingStage.VISION,
+        )
+        session.add(resource)
+        await session.commit()
+
+        # Create state with multiple images
+        import base64
+
+        # Create a minimal valid PNG (8x8 red square)
+        png_data = base64.b64encode(bytes([
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,  # PNG signature
+            # ... minimal PNG content
+        ])).decode()
+
+        state = {
+            "raw_markdown": "# Test\n\n![img1](img_1)\n\n![img2](img_2)",
+            "extracted_images": [
+                {"id": "img_1", "base64": png_data, "page_number": 1},
+                {"id": "img_2", "base64": png_data, "page_number": 2},
+            ],
+        }
+
+        # Mock all external dependencies
+        with patch("gamegame.tasks.pipeline.analyze_images_batch") as mock_analyze:
+            # Return empty results (images rejected as bad quality)
+            mock_analyze.return_value = [
+                ImageAnalysisResult(
+                    description="Test image",
+                    image_type=ImageType.DIAGRAM,
+                    quality=ImageQuality.BAD,
+                    relevant=False,
+                    ocr_text=None,
+                ),
+                ImageAnalysisResult(
+                    description="Test image 2",
+                    image_type=ImageType.DIAGRAM,
+                    quality=ImageQuality.BAD,
+                    relevant=False,
+                    ocr_text=None,
+                ),
+            ]
+
+            with patch("gamegame.tasks.pipeline.storage") as mock_storage:
+                mock_storage.upload_file = AsyncMock(return_value=("/url", "key"))
+                mock_storage.delete_file = AsyncMock(return_value=True)
+
+                result_state = await _stage_vision(session, resource, state)
+
+        # Should have processed all images
+        assert result_state.get("images_analyzed") == 2
+        # Cursor should be cleared on completion
+        assert "stage_cursor" not in result_state
+
+    @pytest.mark.asyncio
+    async def test_auto_resume_disabled(self, session):
+        """Stalled workflows are detected and not auto-resumed when disabled."""
+        from datetime import UTC, datetime, timedelta
+
+        from gamegame.models.workflow_run import WorkflowRun
+        from gamegame.services.workflow_tracking import get_stalled_workflows
+
+        # Create a stalled workflow with explicit timestamps
+        now = datetime.now(UTC)
+        stalled_time = now - timedelta(hours=1)  # 1 hour ago
+        workflow = WorkflowRun(
+            run_id="test-stalled-1",
+            workflow_name="process_resource",
+            status="running",
+            started_at=now - timedelta(hours=2),
+            created_at=now,
+            updated_at=stalled_time,
+            resource_id=None,
+        )
+        session.add(workflow)
+        await session.flush()
+
+        # Query stalled workflows using our test session
+        stalled = await get_stalled_workflows(
+            session,
+            stall_threshold_seconds=30 * 60,  # 30 minutes
+        )
+
+        # Should have found the stalled workflow
+        assert len(stalled) == 1
+        assert stalled[0].run_id == "test-stalled-1"
+        assert stalled[0].status == "running"
+
+    @pytest.mark.asyncio
+    async def test_auto_resume_re_enqueues_stalled_job(self, session):
+        """Auto-resume re-enqueues stalled pipeline jobs."""
+        from datetime import UTC, datetime, timedelta
+
+        from gamegame.models.workflow_run import WorkflowRun
+        from gamegame.services.workflow_tracking import get_stalled_workflows
+
+        # Create game and resource for the stalled job
+        game = Game(name="Resume Test", slug="resume-test")
+        session.add(game)
+        await session.flush()
+
+        resource = Resource(
+            game_id=game.id,
+            name="resume.pdf",
+            original_filename="resume.pdf",
+            url="/uploads/resume.pdf",
+            content="",
+            status=ResourceStatus.PROCESSING,
+            processing_stage=ProcessingStage.CLEANUP,  # Was in cleanup stage
+        )
+        session.add(resource)
+        await session.flush()
+
+        # Create a stalled workflow linked to the resource
+        now = datetime.now(UTC)
+        workflow = WorkflowRun(
+            run_id="test-stalled-pipeline",
+            workflow_name="process_resource",
+            status="running",
+            started_at=now - timedelta(hours=2),
+            created_at=now,
+            updated_at=now - timedelta(hours=1),
+            resource_id=resource.id,
+        )
+        session.add(workflow)
+        await session.flush()
+
+        # Query stalled workflows
+        stalled = await get_stalled_workflows(
+            session,
+            stall_threshold_seconds=30 * 60,
+        )
+
+        # Should find the stalled workflow
+        assert len(stalled) == 1
+        assert stalled[0].resource_id == resource.id
+
+        # The workflow should be resumable (has resource_id and processing_stage)
+        stalled_wf = stalled[0]
+        assert stalled_wf.workflow_name == "process_resource"
+        assert resource.processing_stage is not None

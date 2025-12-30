@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from gamegame.api.middleware import RequestIDMiddleware, RequestLoggingMiddleware
+from gamegame.api.middleware import RequestIDMiddleware
 from gamegame.api.router import api_router
 from gamegame.config import settings
 from gamegame.database import close_db
@@ -51,8 +51,7 @@ app = FastAPI(
     openapi_url="/api/openapi.json" if settings.debug_enabled else None,
 )
 
-# Request ID middleware (must be added first to wrap other middleware)
-app.add_middleware(RequestLoggingMiddleware)  # type: ignore[arg-type]
+# Request ID middleware for distributed tracing
 app.add_middleware(RequestIDMiddleware)  # type: ignore[arg-type]
 
 # CORS middleware
@@ -74,28 +73,38 @@ uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
 
 # Serve static files in production (React SPA)
-frontend_dist = Path(__file__).parent.parent.parent.parent / "frontend" / "dist"
-if frontend_dist.exists():
+# Note: In development, Vite handles SPA routing; this is only for production builds
+frontend_dist = Path(__file__).parent.parent.parent.parent / "frontend" / "build" / "client"
+if frontend_dist.exists() and (frontend_dist / "index.html").exists():
+    from fastapi import Request
+    from fastapi.responses import FileResponse
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
     app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="assets")
 
-    from fastapi.responses import FileResponse
+    @app.exception_handler(404)
+    async def spa_404_handler(request: Request, _exc: StarletteHTTPException):
+        """Serve SPA for 404s that aren't API/uploads/assets requests."""
+        path = request.url.path
+        # Don't serve SPA for API, uploads, or assets - return actual 404
+        if path.startswith(("/api", "/uploads", "/assets")):
+            from fastapi.responses import JSONResponse
 
-    @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):  # noqa: ARG001
-        """Serve React SPA for all non-API routes."""
-        # Serve index.html for SPA routing
-        index_path = frontend_dist / "index.html"
-        if index_path.exists():
-            return FileResponse(index_path)
-        return {"error": "Frontend not built"}
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+
+        # Serve index.html for SPA client-side routing
+        return FileResponse(frontend_dist / "index.html")
 
 
 if __name__ == "__main__":
     import uvicorn
+
+    from gamegame.logging import get_uvicorn_log_config
 
     uvicorn.run(
         "gamegame.main:app",
         host="0.0.0.0",
         port=8000,
         reload=settings.is_development,
+        log_config=get_uvicorn_log_config(),
     )

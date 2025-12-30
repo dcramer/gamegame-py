@@ -4,10 +4,10 @@ import { Link } from "react-router";
 import type { Game } from "~/api/types";
 import { ImageGallery, MessageBubble, ToolCallsList } from "~/components/chat";
 import { ErrorBoundary } from "~/components/error-boundary";
-import { Spinner } from "~/components/ui/spinner";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
 import { Input } from "~/components/ui/input";
+import { Spinner } from "~/components/ui/spinner";
 import { useAuth } from "~/contexts/auth";
 import { useChat } from "~/hooks/useChat";
 import type { Route } from "./+types/games.$gameIdOrSlug";
@@ -88,8 +88,7 @@ export default function GamePage({ loaderData }: Route.ComponentProps) {
     }
   };
 
-  const showThinkingIndicator =
-    isChatLoading && !streamingContent && messages.length > 0;
+  const showThinkingIndicator = isChatLoading && !streamingContent && messages.length > 0;
 
   return (
     <div className="relative h-screen">
@@ -127,9 +126,7 @@ export default function GamePage({ loaderData }: Route.ComponentProps) {
               )}
             </div>
             <div className="gap-4 items-center hidden lg:flex">
-              {game.year && (
-                <span className="text-muted-foreground text-sm">{game.year}</span>
-              )}
+              {game.year && <span className="text-muted-foreground text-sm">{game.year}</span>}
               <p className="text-muted-foreground text-sm">
                 <Button
                   size="sm"
@@ -186,9 +183,7 @@ export default function GamePage({ loaderData }: Route.ComponentProps) {
                   ))}
 
                   {/* Tool calls for current turn (during streaming) */}
-                  {isChatLoading && toolCalls.length > 0 && (
-                    <ToolCallsList toolCalls={toolCalls} />
-                  )}
+                  {isChatLoading && toolCalls.length > 0 && <ToolCallsList toolCalls={toolCalls} />}
 
                   {/* Thinking indicator - shows while loading, before streaming */}
                   {showThinkingIndicator && (
@@ -242,10 +237,7 @@ export default function GamePage({ loaderData }: Route.ComponentProps) {
             </div>
 
             {/* Input */}
-            <form
-              onSubmit={handleSubmit}
-              className="flex items-center gap-2 h-12"
-            >
+            <form onSubmit={handleSubmit} className="flex items-center gap-2 h-12">
               <Input
                 ref={inputRef}
                 value={inputValue}

@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from saq import Queue
+from saq import CronJob, Queue
 
 from gamegame.config import settings
 
@@ -12,8 +12,10 @@ logger = logging.getLogger(__name__)
 # Main task queue
 queue = Queue.from_url(settings.redis_url)
 
-# Job timeout: 30 minutes for PDF processing (can take a while for large docs)
-PIPELINE_TIMEOUT_SECONDS = 30 * 60
+# No hard job timeout - rely on heartbeat-based stall detection instead.
+# Jobs checkpoint their progress and can resume after deploys or failures.
+# Setting to None means no SAQ timeout; stall detection handles stuck jobs.
+PIPELINE_TIMEOUT_SECONDS: int | None = None
 
 # Track if we're shutting down gracefully
 _shutting_down = False
@@ -23,8 +25,22 @@ def get_queue_settings() -> dict:
     """Get SAQ queue settings for the worker."""
     # Import here to avoid circular imports
     from gamegame.tasks.attachments import analyze_attachment
-    from gamegame.tasks.maintenance import cleanup_orphaned_blobs, prune_workflow_runs
+    from gamegame.tasks.maintenance import (
+        cleanup_orphaned_blobs,
+        prune_workflow_runs,
+        recover_stalled_workflows,
+    )
     from gamegame.tasks.pipeline import process_resource
+
+    # Cron jobs for periodic maintenance
+    cron_jobs = [
+        # Check for stalled workflows every 10 minutes
+        CronJob(recover_stalled_workflows, cron="*/10 * * * *"),
+        # Prune old workflow runs daily at 3am
+        CronJob(prune_workflow_runs, cron="0 3 * * *"),
+        # Clean up orphaned blobs weekly on Sunday at 4am
+        CronJob(cleanup_orphaned_blobs, cron="0 4 * * 0"),
+    ]
 
     return {
         "queue": queue,
@@ -33,7 +49,9 @@ def get_queue_settings() -> dict:
             analyze_attachment,
             cleanup_orphaned_blobs,
             prune_workflow_runs,
+            recover_stalled_workflows,
         ],
+        "cron_jobs": cron_jobs,
         "concurrency": 2,  # Number of concurrent tasks
         "startup": startup,
         "shutdown": shutdown,
@@ -129,6 +147,7 @@ def is_shutting_down() -> bool:
 async def enqueue(
     function_name: str,
     timeout: int | None = None,
+    key: str | None = None,
     **kwargs: Any,
 ) -> str:
     """Enqueue a task for background processing.
@@ -136,12 +155,13 @@ async def enqueue(
     Args:
         function_name: Name of the registered task function
         timeout: Optional timeout in seconds
+        key: Optional job key (for preserving run_id on resume)
         **kwargs: Arguments to pass to the task
 
     Returns:
         Job ID
     """
-    job = await queue.enqueue(function_name, timeout=timeout, **kwargs)
+    job = await queue.enqueue(function_name, timeout=timeout, key=key, **kwargs)
     if job is None:
         raise RuntimeError(f"Failed to enqueue task: {function_name}")
     logger.info(f"Enqueued task: {function_name} (id={job.id})")

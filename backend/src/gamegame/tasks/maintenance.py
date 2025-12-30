@@ -8,14 +8,16 @@ from sqlmodel import delete, select
 
 from gamegame.database import get_session_context
 from gamegame.models import Attachment, Resource
-from gamegame.models.workflow_run import WorkflowRun, WorkflowStatus
+from gamegame.models.workflow_run import WorkflowRun
 from gamegame.services.storage import storage
 from gamegame.services.workflow_tracking import (
     complete_workflow_run,
     fail_workflow_run,
     get_or_create_workflow_run,
+    get_stalled_workflows,
     start_workflow_run,
 )
+from gamegame.tasks.queue import enqueue
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +169,7 @@ async def prune_workflow_runs(
                 .where(WorkflowRun.created_at < cutoff_date)  # type: ignore[arg-type]
                 .where(
                     WorkflowRun.status.in_(  # type: ignore[attr-defined]
-                        [WorkflowStatus.COMPLETED, WorkflowStatus.FAILED, WorkflowStatus.CANCELLED]
+                        ["completed", "failed", "cancelled"]
                     )
                 )
             )
@@ -184,7 +186,7 @@ async def prune_workflow_runs(
                     .where(WorkflowRun.created_at < cutoff_date)  # type: ignore[arg-type]
                     .where(
                         WorkflowRun.status.in_(  # type: ignore[attr-defined]
-                            [WorkflowStatus.COMPLETED, WorkflowStatus.FAILED, WorkflowStatus.CANCELLED]
+                            ["completed", "failed", "cancelled"]
                         )
                     )
                 )
@@ -216,6 +218,196 @@ async def prune_workflow_runs(
             return {"success": False, "error": error}
 
 
+# Default stall threshold (45 minutes - slightly longer than pipeline timeout)
+STALL_THRESHOLD_SECONDS = 45 * 60
+
+
+async def recover_stalled_workflows(
+    ctx: dict[str, Any],
+    stall_threshold_seconds: int = STALL_THRESHOLD_SECONDS,
+    dry_run: bool = False,
+    auto_resume: bool = True,
+) -> dict[str, Any]:
+    """Find and recover workflows that appear to be stalled.
+
+    A stalled workflow is one that's been in "running" status for longer
+    than the threshold. This typically happens when:
+    - The worker crashed or was killed
+    - The task hit an unhandled exception that didn't properly fail the workflow
+    - The Redis connection was lost during processing
+
+    When auto_resume is enabled (default), stalled pipeline jobs are re-enqueued
+    to continue from their last checkpoint. Otherwise, they are marked as failed.
+
+    Args:
+        ctx: SAQ context
+        stall_threshold_seconds: How long before a running job is considered stalled
+        dry_run: If True, only report what would be recovered
+        auto_resume: If True, re-enqueue stalled jobs instead of failing them
+
+    Returns:
+        Dict with recovery results
+    """
+    job = ctx.get("job")
+    run_id = job.key if job else f"local-recover-{datetime.now(UTC).isoformat()}"
+
+    async with get_session_context() as session:
+        # Create workflow run record for this maintenance task
+        await get_or_create_workflow_run(
+            session,
+            run_id=run_id,
+            workflow_name="recover_stalled_workflows",
+            input_data={
+                "stall_threshold_seconds": stall_threshold_seconds,
+                "dry_run": dry_run,
+            },
+        )
+        await start_workflow_run(session, run_id)
+        await session.commit()
+
+        try:
+            # Find stalled workflows
+            stalled = await get_stalled_workflows(
+                session,
+                stall_threshold_seconds=stall_threshold_seconds,
+            )
+
+            logger.info(f"Found {len(stalled)} stalled workflows")
+
+            recovered_count = 0
+            resumed_count = 0
+            failed_recoveries: list[dict[str, str]] = []
+
+            for workflow in stalled:
+                try:
+                    # Calculate how long since last activity (heartbeat)
+                    stall_duration = datetime.now(UTC) - workflow.updated_at  # type: ignore[operator]
+                    stall_minutes = int(stall_duration.total_seconds() / 60)
+                    total_runtime = datetime.now(UTC) - workflow.started_at if workflow.started_at else stall_duration  # type: ignore[operator]
+                    total_minutes = int(total_runtime.total_seconds() / 60)
+
+                    # Check if this is a resumable pipeline job
+                    can_resume = (
+                        auto_resume
+                        and workflow.workflow_name == "process_resource"
+                        and workflow.resource_id
+                    )
+
+                    if can_resume and not dry_run:
+                        # Get the resource to check its state
+                        stmt = select(Resource).where(Resource.id == workflow.resource_id)
+                        result = await session.execute(stmt)
+                        resource = result.scalar_one_or_none()
+
+                        if resource and resource.processing_stage:
+                            # Re-enqueue to continue from last checkpoint
+                            # Use a new key since the old job is stalled
+                            new_key = f"{workflow.run_id}-resume-{datetime.now(UTC).timestamp()}"
+                            await enqueue(
+                                "process_resource",
+                                key=new_key,
+                                resource_id=resource.id,
+                                start_stage=resource.processing_stage.value,
+                                retry_count=(workflow.extra_data or {}).get("retry_count", 0) + 1,
+                            )
+
+                            # Update the old workflow run to indicate it was resumed
+                            workflow.status = "cancelled"
+                            workflow.completed_at = datetime.now(UTC)
+                            workflow.error = (
+                                f"Workflow stalled after {stall_minutes} minutes without activity. "
+                                "Automatically resumed with new job."
+                            )
+                            workflow.error_code = "RESUMED"
+                            workflow.extra_data = {
+                                **(workflow.extra_data or {}),
+                                "resumed_at": datetime.now(UTC).isoformat(),
+                                "resumed_with_key": new_key,
+                                "stall_duration_seconds": stall_duration.total_seconds(),
+                            }
+
+                            resumed_count += 1
+                            logger.info(
+                                f"Resumed stalled workflow: {workflow.run_id} -> {new_key} "
+                                f"(resource={resource.id}, stage={resource.processing_stage.value})"
+                            )
+                            continue
+
+                    # Fall back to marking as failed
+                    if not dry_run:
+                        workflow.status = "failed"
+                        workflow.completed_at = datetime.now(UTC)
+                        workflow.error = (
+                            f"Workflow stalled - no activity for {stall_minutes} minutes "
+                            f"(total runtime: {total_minutes} minutes). "
+                            "Marked as failed by automatic recovery."
+                        )
+                        workflow.error_code = "STALLED"
+
+                        workflow.extra_data = {
+                            **(workflow.extra_data or {}),
+                            "recovered_at": datetime.now(UTC).isoformat(),
+                            "stall_duration_seconds": stall_duration.total_seconds(),
+                            "total_runtime_seconds": total_runtime.total_seconds(),
+                        }
+
+                        # Reset associated resource to failed
+                        if workflow.resource_id:
+                            stmt = select(Resource).where(Resource.id == workflow.resource_id)
+                            result = await session.execute(stmt)
+                            resource = result.scalar_one_or_none()
+                            if resource and resource.status == "processing":
+                                resource.status = "failed"
+                                resource.error_message = (
+                                    f"Processing stalled - no activity for {stall_minutes} minutes"
+                                )
+                                logger.info(
+                                    f"Reset resource {resource.id} to failed status"
+                                )
+
+                    recovered_count += 1
+                    logger.info(
+                        f"{'Would mark as failed' if dry_run else 'Marked as failed'} stalled workflow: "
+                        f"{workflow.run_id} ({workflow.workflow_name})"
+                    )
+
+                except Exception as e:
+                    logger.error(f"Failed to recover workflow {workflow.run_id}: {e}")
+                    failed_recoveries.append({
+                        "run_id": workflow.run_id,
+                        "error": str(e),
+                    })
+
+            output_data = {
+                "dry_run": dry_run,
+                "auto_resume": auto_resume,
+                "stall_threshold_seconds": stall_threshold_seconds,
+                "stalled_count": len(stalled),
+                "recovered_count": recovered_count,
+                "resumed_count": resumed_count,
+                "failed_recoveries": failed_recoveries,
+            }
+
+            await complete_workflow_run(session, run_id, output_data)
+            await session.commit()
+
+            logger.info(
+                f"Stalled workflow recovery complete: {len(stalled)} stalled, "
+                f"{resumed_count} resumed, {recovered_count} marked failed, "
+                f"{len(failed_recoveries)} errors"
+            )
+
+            return {"success": len(failed_recoveries) == 0, **output_data}
+
+        except Exception as e:
+            error = f"Stalled workflow recovery failed: {e}"
+            logger.exception(error)
+            await fail_workflow_run(session, run_id, error, "RECOVERY_ERROR")
+            await session.commit()
+            return {"success": False, "error": error}
+
+
 # Set SAQ job timeouts
 cleanup_orphaned_blobs.timeout = MAINTENANCE_TIMEOUT_SECONDS  # type: ignore[attr-defined]
 prune_workflow_runs.timeout = MAINTENANCE_TIMEOUT_SECONDS  # type: ignore[attr-defined]
+recover_stalled_workflows.timeout = MAINTENANCE_TIMEOUT_SECONDS  # type: ignore[attr-defined]

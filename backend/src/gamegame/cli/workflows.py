@@ -12,7 +12,7 @@ from sqlmodel import select
 
 from gamegame.database import get_session_context
 from gamegame.models import Game, Resource
-from gamegame.models.workflow_run import WorkflowRun, WorkflowStatus
+from gamegame.models.workflow_run import WorkflowRun
 from gamegame.tasks import queue
 from gamegame.tasks.queue import PIPELINE_TIMEOUT_SECONDS
 
@@ -20,14 +20,14 @@ console = Console()
 app = typer.Typer(help="Workflow management commands")
 
 
-def status_style(status: WorkflowStatus) -> str:
+def status_style(status: str) -> str:
     """Get Rich style for workflow status."""
     return {
-        WorkflowStatus.QUEUED: "yellow",
-        WorkflowStatus.RUNNING: "cyan",
-        WorkflowStatus.COMPLETED: "green",
-        WorkflowStatus.FAILED: "red",
-        WorkflowStatus.CANCELLED: "dim",
+        "queued": "yellow",
+        "running": "cyan",
+        "completed": "green",
+        "failed": "red",
+        "cancelled": "dim",
     }.get(status, "white")
 
 
@@ -70,13 +70,13 @@ def list_workflows(
 
             # Filter by status
             if status:
-                try:
-                    status_enum = WorkflowStatus(status.lower())
-                    stmt = stmt.where(WorkflowRun.status == status_enum)
-                except ValueError:
+                valid_statuses = ["queued", "running", "completed", "failed", "cancelled"]
+                status_lower = status.lower()
+                if status_lower not in valid_statuses:
                     console.print(f"[red]Error:[/red] Invalid status '{status}'")
-                    console.print(f"Valid: {', '.join(s.value for s in WorkflowStatus)}")
-                    raise typer.Exit(1) from None
+                    console.print(f"Valid: {', '.join(valid_statuses)}")
+                    raise typer.Exit(1)
+                stmt = stmt.where(WorkflowRun.status == status_lower)
 
             result = await session.execute(stmt)
             workflows = result.scalars().all()
@@ -94,7 +94,7 @@ def list_workflows(
             table.add_column("Created", style="dim")
 
             for wf in workflows:
-                status_text = f"[{status_style(wf.status)}]{wf.status.value}[/{status_style(wf.status)}]"
+                status_text = f"[{status_style(wf.status)}]{wf.status}[/{status_style(wf.status)}]"
                 duration = format_duration(wf.started_at, wf.completed_at)
                 resource = wf.resource_id[:8] + "..." if wf.resource_id else "-"
                 created = wf.created_at.strftime("%Y-%m-%d %H:%M") if wf.created_at else "-"
@@ -144,7 +144,7 @@ def show_workflow(
                 result = await session.execute(stmt)
                 resource_name = result.scalar_one_or_none()
 
-            status_text = f"[{status_style(workflow.status)}]{workflow.status.value.upper()}[/{status_style(workflow.status)}]"
+            status_text = f"[{status_style(workflow.status)}]{workflow.status.upper()}[/{status_style(workflow.status)}]"
             duration = format_duration(workflow.started_at, workflow.completed_at)
 
             content = f"""[bold]Status:[/bold] {status_text}
@@ -204,8 +204,8 @@ def retry_workflow(
                 console.print(f"[red]Error:[/red] Workflow '{workflow_id}' not found")
                 raise typer.Exit(1)
 
-            if workflow.status != WorkflowStatus.FAILED:
-                console.print(f"[yellow]Warning:[/yellow] Workflow is not failed (status: {workflow.status.value})")
+            if workflow.status != "failed":
+                console.print(f"[yellow]Warning:[/yellow] Workflow is not failed (status: {workflow.status})")
                 if not typer.confirm("Retry anyway?"):
                     raise typer.Exit(0)
 
@@ -249,11 +249,11 @@ def cancel_workflow(
                 console.print(f"[red]Error:[/red] Workflow '{workflow_id}' not found")
                 raise typer.Exit(1)
 
-            if workflow.status not in (WorkflowStatus.QUEUED, WorkflowStatus.RUNNING):
-                console.print(f"[yellow]Warning:[/yellow] Workflow is not active (status: {workflow.status.value})")
+            if workflow.status not in ("queued", "running"):
+                console.print(f"[yellow]Warning:[/yellow] Workflow is not active (status: {workflow.status})")
                 raise typer.Exit(1)
 
-            workflow.status = WorkflowStatus.CANCELLED
+            workflow.status = "cancelled"
             await session.commit()
 
             console.print(f"[green]Cancelled[/green] workflow {workflow.id}")

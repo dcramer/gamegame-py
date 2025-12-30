@@ -19,8 +19,33 @@ from sqlmodel import SQLModel
 from gamegame.config import settings
 from gamegame.database import get_session
 from gamegame.main import app
-from gamegame.models import Game, User
+from gamegame.models import Attachment, Fragment, Game, Resource, User
+from gamegame.models.attachment import AttachmentType
+from gamegame.models.fragment import FragmentType
+from gamegame.models.resource import ResourceStatus, ResourceType
 from gamegame.services.auth import create_token
+
+
+def make_openai_chat_response(content: str) -> MagicMock:
+    """Create a mock OpenAI chat completion response.
+
+    Usage:
+        response = make_openai_chat_response("Test answer")
+        mock_client.chat.completions.create = AsyncMock(return_value=response)
+    """
+    mock_message = MagicMock()
+    mock_message.content = content
+    mock_message.tool_calls = None
+    mock_message.model_dump.return_value = {"role": "assistant", "content": content}
+
+    mock_choice = MagicMock()
+    mock_choice.message = mock_message
+    mock_choice.finish_reason = "stop"
+
+    mock_response = MagicMock()
+    mock_response.choices = [mock_choice]
+    mock_response.model = "gpt-4o-mini"
+    return mock_response
 
 
 @pytest.fixture(autouse=True)
@@ -164,6 +189,71 @@ async def game(session: AsyncSession) -> Game:
     session.add(game)
     await session.flush()
     return game
+
+
+@pytest.fixture
+async def resource(session: AsyncSession, game: Game) -> Resource:
+    """Create a test resource."""
+    resource = Resource(
+        game_id=game.id,  # type: ignore[arg-type]
+        name="Test Rulebook",
+        original_filename="test-rulebook.pdf",
+        url="/uploads/test.pdf",
+        content="This is a test rulebook with setup instructions.",
+        status=ResourceStatus.COMPLETED,
+        resource_type=ResourceType.RULEBOOK,
+    )
+    session.add(resource)
+    await session.flush()
+    return resource
+
+
+@pytest.fixture
+async def attachment(session: AsyncSession, game: Game, resource: Resource) -> Attachment:
+    """Create a test attachment."""
+    attachment = Attachment(
+        game_id=game.id,  # type: ignore[arg-type]
+        resource_id=resource.id,  # type: ignore[arg-type]
+        type=AttachmentType.IMAGE,
+        mime_type="image/png",
+        blob_key="test/test.png",
+        url="/uploads/test.png",
+        page_number=1,
+        description="A diagram showing game setup",
+    )
+    session.add(attachment)
+    await session.flush()
+    return attachment
+
+
+@pytest.fixture
+async def fragment(session: AsyncSession, game: Game, resource: Resource) -> Fragment:
+    """Create a test fragment with search vector."""
+    content = "The player who controls the most territory wins the game. Each turn you can move units."
+    fragment = Fragment(
+        game_id=game.id,  # type: ignore[arg-type]
+        resource_id=resource.id,  # type: ignore[arg-type]
+        content=content,
+        type=FragmentType.TEXT,
+        page_number=5,
+        section="Victory Conditions",
+        embedding=[0.0] * 1536,  # Dummy embedding vector
+    )
+    session.add(fragment)
+    await session.flush()
+    # Set search_vector since trigger doesn't exist in test DB
+    await session.execute(
+        text("UPDATE fragments SET search_vector = to_tsvector('english', :content) WHERE id = :id"),
+        {"content": content, "id": fragment.id},
+    )
+    await session.refresh(fragment)
+    return fragment
+
+
+@pytest.fixture
+def pdf_content() -> bytes:
+    """Minimal valid PDF content for upload tests."""
+    return b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Resources<<>>>>endobj xref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000052 00000 n \n0000000101 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF"
 
 
 # Helper to make authenticated requests

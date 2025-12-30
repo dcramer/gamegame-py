@@ -65,7 +65,8 @@ export default function SignInPage() {
             <p className="text-sm text-muted-foreground mb-4">
               Click the link in your email to sign in. The link will expire in 15 minutes.
             </p>
-            {magicLink && (
+            {/* Only show magic link in development mode - server only sends it in dev */}
+            {(import.meta as { env?: { DEV?: boolean } }).env?.DEV && magicLink && (
               <div className="mt-4 p-4 bg-muted rounded-lg">
                 <p className="text-xs text-muted-foreground mb-2">Development mode - Magic link:</p>
                 <a href={magicLink} className="text-sm text-blue-600 hover:underline break-all">

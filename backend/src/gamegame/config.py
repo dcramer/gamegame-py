@@ -37,9 +37,8 @@ class Settings(BaseSettings):
 
     # Auth
     session_secret: str = Field(
-        default="change-this-to-a-secure-32-char-secret",
         min_length=32,
-        description="Secret key for JWT signing",
+        description="Secret key for JWT signing (required, no default)",
     )
     jwt_algorithm: str = Field(default="HS256", description="JWT algorithm")
     jwt_expiration_days: int = Field(default=30, description="JWT token expiration in days")
@@ -102,6 +101,9 @@ class Settings(BaseSettings):
 
     # Resend settings (when email_backend=resend)
     resend_api_key: str = Field(default="", description="Resend API key")
+
+    # BoardGameGeek
+    bgg_api_key: str = Field(default="", description="BoardGameGeek API key (required as of 2025)")
 
     # Sentry
     sentry_dsn: str = Field(default="", description="Sentry DSN for error tracking")

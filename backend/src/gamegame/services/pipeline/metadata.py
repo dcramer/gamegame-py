@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from gamegame.config import settings
 from gamegame.models.model_config import get_model
-from gamegame.services.openai_client import get_openai_client
+from gamegame.services.openai_client import create_chat_completion
 
 
 @dataclass
@@ -124,9 +124,7 @@ Return a JSON object with:
 Keep the original document language. If the content does not describe rules, fall back to a neutral generic title."""
 
     try:
-        client = get_openai_client()
-
-        response = await client.chat.completions.create(
+        response = await create_chat_completion(
             model=get_model("reasoning"),
             messages=[
                 {
@@ -139,8 +137,8 @@ Return ONLY valid JSON (no markdown, no code fences) with keys "name" and "descr
                 {"role": "user", "content": prompt},
             ],
             response_format={"type": "json_object"},
-            temperature=0.3,
-            max_tokens=500,
+            temperature=1,  # GPT-5/GPT-4o requires temperature 1
+            max_completion_tokens=500,
         )
 
         content = response.choices[0].message.content

@@ -2,13 +2,13 @@
 
 import asyncio
 import base64
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 
 from gamegame.config import settings
 from gamegame.models.model_config import get_model
-from gamegame.services.openai_client import get_openai_client
+from gamegame.services.openai_client import create_chat_completion
 
 
 class ImageType(str, Enum):
@@ -50,17 +50,29 @@ class ImageAnalysisResult:
     ocr_text: str | None = None
 
 
-ANALYSIS_PROMPT = """Analyze this image from a board game rulebook.
+ANALYSIS_PROMPT = """Analyze this image from a board game rulebook for searchability.
 
 Context:
 {context}
 
+Your description should help players FIND this image when searching for related game concepts.
+
 Provide analysis with:
-1. **description**: What's visible (2-3 sentences about game elements, text, spatial relationships)
+1. **description**: ALWAYS write a description (2-4 sentences), even for decorative or low-quality images. Include:
+   - What the image shows (components, scenes, visual elements)
+   - Any game concepts, rules, or mechanics it illustrates
+   - Key game terms and component names visible or implied
+   - For decorative images: describe the artwork/illustration theme
+   - Do NOT start with "Photograph of", "Image of", "Diagram of", etc. — just describe the content directly.
 2. **quality**: "good" (clear, readable, useful) or "bad" (blurry, too small, unclear)
-3. **relevant**: true if it contains useful gameplay information, false if decorative
+3. **relevant**: true if it contains useful gameplay information, false if purely decorative
 4. **type**: One of: diagram, table, photo, icon, decorative
 5. **ocrText**: Extract any text visible in tables/diagrams, or null if none
+
+Example descriptions:
+- "A special card that awards victory points for achieving a specific milestone. Shows the point value, conditions to earn it, and how it can be lost to another player."
+- "Setup diagram showing initial board placement with labeled positions A, B, and C. Arrows indicate valid placement locations for player pieces along edges and intersections."
+- "Resource trading reference table listing exchange rates between different resource types and the bank."
 
 Respond with valid JSON only."""
 
@@ -78,6 +90,71 @@ RESPONSE_SCHEMA = {
 }
 
 
+def extract_image_context(
+    image_id: str,
+    markdown: str,
+    chars_before: int = 300,
+    chars_after: int = 200,
+    use_attachment_url: bool = False,
+) -> tuple[str | None, str | None]:
+    """Extract section and surrounding text for an image from markdown.
+
+    Args:
+        image_id: The image ID to find in the markdown
+        markdown: The full markdown content
+        chars_before: Characters to extract before the image
+        chars_after: Characters to extract after the image
+        use_attachment_url: If True, search for attachment://image_id pattern
+            (used for processed content). If False, search for raw image_id
+            (used during pipeline processing with Mistral IDs).
+
+    Returns:
+        Tuple of (section_header, surrounding_text)
+    """
+    import re
+
+    # Find the image reference in markdown
+    # Pipeline uses: ![description](mistral_id)
+    # Processed content uses: ![description](attachment://attachment_id)
+    if use_attachment_url:
+        pattern = rf"!\[[^\]]*\]\(attachment://{re.escape(image_id)}\)"
+    else:
+        pattern = rf"!\[[^\]]*\]\({re.escape(image_id)}\)"
+    match = re.search(pattern, markdown)
+
+    if not match:
+        return None, None
+
+    img_pos = match.start()
+
+    # Extract surrounding text
+    start = max(0, img_pos - chars_before)
+    end = min(len(markdown), match.end() + chars_after)
+
+    # Get text before and after, excluding the image reference itself
+    text_before = markdown[start:img_pos].strip()
+    text_after = markdown[match.end():end].strip()
+
+    # Clean up the surrounding text - remove other image references
+    text_before = re.sub(r"!\[[^\]]*\]\([^)]+\)", "[image]", text_before)
+    text_after = re.sub(r"!\[[^\]]*\]\([^)]+\)", "[image]", text_after)
+
+    surrounding = f"{text_before} [...image...] {text_after}".strip()
+
+    # Find the nearest section header above the image
+    section_header = None
+    text_before_image = markdown[:img_pos]
+
+    # Look for markdown headers (# Header, ## Header, etc.)
+    header_matches = list(re.finditer(r"^(#{1,4})\s+(.+)$", text_before_image, re.MULTILINE))
+    if header_matches:
+        # Get the last (nearest) header
+        last_header = header_matches[-1]
+        section_header = last_header.group(2).strip()
+
+    return section_header, surrounding
+
+
 def _build_context_string(context: ImageAnalysisContext) -> str:
     """Build context string for the prompt."""
     parts = [f"- Page: {context.page_number}"]
@@ -88,34 +165,61 @@ def _build_context_string(context: ImageAnalysisContext) -> str:
     if context.section:
         parts.append(f"- Section: {context.section}")
     if context.surrounding_text:
-        # Limit surrounding text to 500 chars
-        text = context.surrounding_text[:500]
-        parts.append(f'\nRelevant rulebook text:\n"""{text}"""')
+        # Limit surrounding text to 600 chars
+        text = context.surrounding_text[:600]
+        parts.append(f'\nSurrounding rulebook text (where this image appears):\n"""{text}"""')
     return "\n".join(parts)
 
 
 def _detect_mime_type(image_bytes: bytes) -> str:
-    """Detect image MIME type from magic bytes."""
+    """Detect image MIME type from magic bytes.
+
+    Supports common formats including both OpenAI-supported formats
+    (PNG, JPEG, WebP, GIF) and unsupported formats (TIFF, BMP, JPEG2000)
+    for better error messages.
+    """
     if len(image_bytes) < 12:
-        return "image/jpeg"
+        return "application/octet-stream"
 
-    # PNG: \x89PNG\r\n\x1a\n
-    if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
-        return "image/png"
+    # Magic byte signatures for different image formats
+    mime_types = [
+        (b"\x89PNG\r\n\x1a\n", 0, 8, "image/png"),
+        (b"\xff\xd8\xff", 0, 3, "image/jpeg"),
+        ((b"GIF87a", b"GIF89a"), 0, 6, "image/gif"),
+        (b"BM", 0, 2, "image/bmp"),
+        ((b"II\x2a\x00", b"MM\x00\x2a"), 0, 4, "image/tiff"),
+        (b"\x00\x00\x01\x00", 0, 4, "image/x-icon"),
+    ]
 
-    # JPEG: \xFF\xD8\xFF
-    if image_bytes[:3] == b"\xff\xd8\xff":
-        return "image/jpeg"
+    for pattern, offset, length, mime in mime_types:
+        data = image_bytes[offset : offset + length]
+        if isinstance(pattern, tuple):
+            if data in pattern:
+                return mime
+        elif data == pattern:
+            return mime
 
-    # WebP: RIFF....WEBP
+    # WebP requires checking two separate regions
     if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
         return "image/webp"
 
-    # GIF magic bytes
-    if image_bytes[:6] in (b"GIF87a", b"GIF89a"):
-        return "image/gif"
+    # JPEG2000 has specific signature
+    if image_bytes[:4] == b"\x00\x00\x00\x0c" and image_bytes[4:8] == b"jP  ":
+        return "image/jp2"
 
-    return "image/jpeg"
+    return "application/octet-stream"
+
+
+def _strip_data_url_prefix(base64_data: str) -> str:
+    """Strip data URL prefix from base64 string if present.
+
+    Mistral OCR returns base64 data with format: data:image/jpeg;base64,/9j/4AAQ...
+    We need to strip the prefix to get the raw base64 data.
+    """
+    if base64_data.startswith("data:"):
+        # Split on first comma and take the base64 part
+        return base64_data.split(",", 1)[1]
+    return base64_data
 
 
 async def analyze_single_image(
@@ -125,7 +229,7 @@ async def analyze_single_image(
     """Analyze a single image using GPT-4o vision.
 
     Args:
-        image_data: Image bytes or base64 string
+        image_data: Image bytes or base64 string (may include data URL prefix)
         context: Context about the image
 
     Returns:
@@ -134,23 +238,31 @@ async def analyze_single_image(
     if not settings.openai_api_key:
         raise ValueError("OPENAI_API_KEY not configured")
 
-    client = get_openai_client()
-
-    # Convert to base64 if bytes
+    # Convert to bytes if base64 string, stripping data URL prefix if present
     if isinstance(image_data, bytes):
-        mime_type = _detect_mime_type(image_data)
-        base64_data = base64.b64encode(image_data).decode("utf-8")
+        image_bytes = image_data
     else:
-        # Assume it's already base64
-        base64_data = image_data
-        mime_type = "image/jpeg"  # Default, will be overridden if data URL
+        base64_str = _strip_data_url_prefix(image_data)
+        image_bytes = base64.b64decode(base64_str)
+
+    mime_type = _detect_mime_type(image_bytes)
+
+    # Check if the format is supported by OpenAI Vision API
+    supported_formats = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+    if mime_type not in supported_formats:
+        raise ValueError(
+            f"Unsupported image format: {mime_type}. "
+            f"OpenAI Vision API only supports: {', '.join(sorted(supported_formats))}"
+        )
+
+    base64_data = base64.b64encode(image_bytes).decode("utf-8")
 
     # Build the prompt
     context_str = _build_context_string(context)
     prompt = ANALYSIS_PROMPT.format(context=context_str)
 
-    # Call vision model with structured output
-    response = await client.chat.completions.create(
+    # Call vision model with structured output (using wrapper with retry logic)
+    response = await create_chat_completion(
         model=get_model("vision"),
         messages=[
             {
@@ -172,7 +284,7 @@ async def analyze_single_image(
                 "strict": True,
             },
         },
-        max_tokens=500,
+        max_completion_tokens=2500,
         temperature=1,  # Required for structured outputs
     )
 
@@ -194,7 +306,7 @@ async def analyze_images_batch(
     images: list[tuple[bytes | str, ImageAnalysisContext]],
     batch_size: int = 3,
     delay_between_batches: float = 1.0,
-    on_progress: Callable[[int, int], None] | None = None,
+    on_progress: Callable[[int, int], None] | Callable[[int, int], Awaitable[None]] | None = None,
 ) -> list[ImageAnalysisResult]:
     """Analyze multiple images in batches to respect rate limits.
 
@@ -207,11 +319,22 @@ async def analyze_images_batch(
     Returns:
         List of ImageAnalysisResult in same order as input
     """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
     results: list[ImageAnalysisResult] = []
     total = len(images)
+    batch_num = 0
+    total_batches = (total + batch_size - 1) // batch_size
+
+    logger.info(f"Starting image analysis: {total} images in {total_batches} batches")
 
     for i in range(0, len(images), batch_size):
         batch = images[i : i + batch_size]
+        batch_num += 1
+
+        logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} images)")
 
         # Process batch in parallel
         batch_results = await asyncio.gather(
@@ -220,9 +343,12 @@ async def analyze_images_batch(
         )
 
         # Handle results, converting exceptions to "bad" quality fallback
-        for result in batch_results:
+        for j, result in enumerate(batch_results):
+            img_idx = i + j
+            page_num = batch[j][1].page_number
+
             if isinstance(result, Exception):
-                # Fallback for failed analysis
+                logger.warning(f"Image {img_idx + 1}/{total} (page {page_num}) analysis failed: {result}")
                 results.append(
                     ImageAnalysisResult(
                         description="Analysis failed",
@@ -233,15 +359,22 @@ async def analyze_images_batch(
                     )
                 )
             else:
+                logger.info(
+                    f"Image {img_idx + 1}/{total} (page {page_num}): "
+                    f"type={result.image_type.value}, quality={result.quality.value}"
+                )
                 results.append(result)  # type: ignore[arg-type]
 
-        # Progress callback
+        # Progress callback (support both sync and async)
         completed = min(i + batch_size, total)
         if on_progress:
-            on_progress(completed, total)
+            result = on_progress(completed, total)
+            if asyncio.iscoroutine(result):
+                await result
 
         # Delay between batches (except for last batch)
         if i + batch_size < len(images):
             await asyncio.sleep(delay_between_batches)
 
+    logger.info(f"Completed image analysis: {total} images processed")
     return results

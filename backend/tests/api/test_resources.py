@@ -2,28 +2,9 @@
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from gamegame.models import Game, Resource
-from gamegame.models.resource import ResourceStatus, ResourceType
 from tests.conftest import AuthenticatedClient
-
-
-@pytest.fixture
-async def resource(session: AsyncSession, game: Game) -> Resource:
-    """Create a test resource."""
-    resource = Resource(
-        game_id=game.id,  # type: ignore[arg-type]
-        name="Test Rulebook",
-        original_filename="rulebook.pdf",
-        url="/uploads/test.pdf",
-        content="",  # Required field
-        status=ResourceStatus.COMPLETED,
-        resource_type=ResourceType.RULEBOOK,
-    )
-    session.add(resource)
-    await session.flush()
-    return resource
 
 
 @pytest.mark.asyncio
@@ -151,12 +132,6 @@ async def test_reprocess_resource(admin_client: AuthenticatedClient, resource: R
 
 
 # --- Upload Resource Tests ---
-
-
-@pytest.fixture
-def pdf_content() -> bytes:
-    """Minimal valid PDF content."""
-    return b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Resources<<>>>>endobj xref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000052 00000 n \n0000000101 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF"
 
 
 @pytest.mark.asyncio

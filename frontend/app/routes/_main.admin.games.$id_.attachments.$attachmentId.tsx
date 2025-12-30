@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { api } from "~/api/client";
 import type { AttachmentUpdate, DetectedType, QualityRating } from "~/api/types";
+import { ConnectionWarning } from "~/components/connection-warning";
+import { PageHeader } from "~/components/page-header";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
@@ -17,7 +19,9 @@ import {
 } from "~/components/ui/select";
 import { Skeleton } from "~/components/ui/skeleton";
 import { Textarea } from "~/components/ui/textarea";
-import { useAttachment } from "~/hooks";
+import { useToast } from "~/contexts/toast";
+import { useAttachment, useGame } from "~/hooks";
+import { isNetworkError, isNotFoundError } from "~/lib/api-errors";
 import { queryKeys } from "~/lib/query";
 
 const DETECTED_TYPES: Array<{ value: DetectedType; label: string }> = [
@@ -36,7 +40,9 @@ const QUALITY_RATINGS: Array<{ value: QualityRating; label: string }> = [
 export default function AttachmentDetailPage() {
   const { id, attachmentId } = useParams<{ id: string; attachmentId: string }>();
   const queryClient = useQueryClient();
-  const { attachment, isLoading, error } = useAttachment(attachmentId);
+  const { toast } = useToast();
+  const { game } = useGame(id);
+  const { attachment, isLoading, error, isFetching, refetch } = useAttachment(attachmentId);
 
   // Form state
   const [description, setDescription] = useState("");
@@ -62,6 +68,17 @@ export default function AttachmentDetailPage() {
       queryClient.invalidateQueries({
         queryKey: queryKeys.attachments.byGame(id!),
       });
+      toast({
+        description: "Attachment updated",
+        variant: "success",
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Update failed",
+        description: err.message,
+        variant: "destructive",
+      });
     },
   });
 
@@ -71,6 +88,17 @@ export default function AttachmentDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: queryKeys.attachments.detail(attachmentId!),
+      });
+      toast({
+        description: "Reprocessing started",
+        variant: "success",
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Reprocess failed",
+        description: err.message,
+        variant: "destructive",
       });
     },
   });
@@ -95,48 +123,84 @@ export default function AttachmentDetailPage() {
   if (isLoading) {
     return (
       <div className="space-y-6">
-        <Skeleton className="h-8 w-48" />
+        <div className="space-y-2">
+          <Skeleton className="h-4 w-48" />
+          <Skeleton className="h-9 w-64" />
+        </div>
         <div className="grid lg:grid-cols-2 gap-6">
           <Skeleton className="aspect-square max-h-[500px]" />
-          <Card>
-            <CardContent className="pt-6 space-y-4">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <Skeleton key={i} className="h-10 w-full" />
-              ))}
-            </CardContent>
-          </Card>
+          <div className="space-y-6">
+            <Skeleton className="h-48 w-full" />
+            <Skeleton className="h-64 w-full" />
+          </div>
         </div>
       </div>
     );
   }
 
-  if (error || !attachment) {
+  // True 404: no data and got a not-found error
+  if (!attachment && isNotFoundError(error)) {
     return (
-      <div className="max-w-2xl">
-        <Card className="border-destructive">
-          <CardContent className="pt-6">
-            <p className="text-destructive">{error || "Attachment not found"}</p>
-            <Button asChild className="mt-4">
-              <Link to={`/admin/games/${id}/attachments`}>Back to Attachments</Link>
-            </Button>
-          </CardContent>
-        </Card>
+      <div className="rounded-md bg-destructive/10 p-6 text-destructive">
+        <p className="font-medium">Attachment not found</p>
+        <p className="text-sm mt-1">The requested attachment could not be found.</p>
+        <Button asChild className="mt-4" variant="outline">
+          <Link to={`/admin/games/${id}/attachments`}>Back to Attachments</Link>
+        </Button>
       </div>
     );
   }
+
+  // No data and network error on initial load
+  if (!attachment && isNetworkError(error)) {
+    return (
+      <div className="rounded-md bg-destructive/10 p-6 text-destructive">
+        <p className="font-medium">Connection error</p>
+        <p className="text-sm mt-1">
+          Unable to load attachment. Check your connection and try again.
+        </p>
+        <Button onClick={() => refetch()} className="mt-4" variant="outline" disabled={isFetching}>
+          {isFetching ? "Retrying..." : "Retry"}
+        </Button>
+      </div>
+    );
+  }
+
+  // No data for unknown reason
+  if (!attachment) {
+    return (
+      <div className="rounded-md bg-destructive/10 p-6 text-destructive">
+        <p className="font-medium">Unable to load attachment</p>
+        <p className="text-sm mt-1">{error?.message || "An unexpected error occurred."}</p>
+        <Button asChild className="mt-4" variant="outline">
+          <Link to={`/admin/games/${id}/attachments`}>Back to Attachments</Link>
+        </Button>
+      </div>
+    );
+  }
+
+  const attachmentTitle = attachment.caption || `Page ${attachment.page_number ?? "?"} Image`;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">{attachment.caption || "Attachment"}</h1>
-          <p className="text-muted-foreground">
-            {attachment.original_filename || `Page ${attachment.page_number ?? "?"}`}
-          </p>
-        </div>
-        <div className="flex gap-2">
+      {/* Show connection warning if we have stale data and a network error */}
+      {isNetworkError(error) && (
+        <ConnectionWarning onRetry={() => refetch()} isRetrying={isFetching} />
+      )}
+
+      <PageHeader
+        breadcrumbs={[
+          { label: "Admin", to: "/admin" },
+          { label: game?.name || "Game", to: `/admin/games/${id}` },
+          { label: "Attachments", to: `/admin/games/${id}/attachments` },
+          { label: attachmentTitle },
+        ]}
+        title={attachmentTitle}
+        stats={attachment.original_filename ?? undefined}
+        actions={
           <Button
             variant="outline"
+            size="sm"
             onClick={() => reprocessMutation.mutate()}
             disabled={reprocessMutation.isPending}
           >
@@ -147,8 +211,8 @@ export default function AttachmentDetailPage() {
             )}
             Reprocess
           </Button>
-        </div>
-      </div>
+        }
+      />
 
       {reprocessMutation.error && (
         <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
@@ -158,17 +222,15 @@ export default function AttachmentDetailPage() {
 
       <div className="grid lg:grid-cols-2 gap-6">
         {/* Image preview */}
-        <Card>
-          <CardContent className="p-4">
-            <img
-              src={attachment.url}
-              alt={attachment.caption || "Attachment"}
-              className="w-full max-h-[500px] object-contain rounded-lg"
-            />
-          </CardContent>
-        </Card>
+        <div className="bg-muted rounded-lg p-4">
+          <img
+            src={attachment.url}
+            alt={attachment.caption || "Attachment"}
+            className="w-full max-h-[500px] object-contain rounded-lg"
+          />
+        </div>
 
-        {/* Edit form */}
+        {/* Sidebar */}
         <div className="space-y-6">
           {/* Metadata */}
           <Card>

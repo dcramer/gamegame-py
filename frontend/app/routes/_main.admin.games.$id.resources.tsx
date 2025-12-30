@@ -1,21 +1,12 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  AlertCircle,
-  CheckCircle,
-  Clock,
-  FileText,
-  Loader2,
-  RefreshCw,
-  Trash2,
-  Upload,
-} from "lucide-react";
-import { useRef, useState } from "react";
-import { Link, useParams } from "react-router";
+import { AlertCircle, CheckCircle, Clock, Loader2, RefreshCw, Trash2 } from "lucide-react";
+import { useCallback, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router";
 import { api } from "~/api/client";
 import type { ResourceStatus } from "~/api/types";
+import { FileUpload } from "~/components/file-upload";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -24,6 +15,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "~/components/ui/dialog";
+import { Progress } from "~/components/ui/progress";
 import { Skeleton } from "~/components/ui/skeleton";
 import {
   Table,
@@ -33,7 +25,9 @@ import {
   TableHeader,
   TableRow,
 } from "~/components/ui/table";
-import { useGame, useResources } from "~/hooks";
+import { useToast } from "~/contexts/toast";
+import { useWorkflowTracking } from "~/contexts/workflow-tracking";
+import { useResources } from "~/hooks";
 import { queryKeys } from "~/lib/query";
 
 function statusVariant(
@@ -68,53 +62,81 @@ function StatusIcon({ status }: { status: ResourceStatus }) {
   }
 }
 
-export default function ResourcesPage() {
+export default function ResourcesTab() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { game, isLoading: gameLoading } = useGame(id);
-  const { resources, isLoading: resourcesLoading, error } = useResources(id);
+  const { toast } = useToast();
+  const { trackResource } = useWorkflowTracking();
+  const { resources, isLoading, error } = useResources(id);
 
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const isLoading = gameLoading || resourcesLoading;
+  const [showUploadDialog, setShowUploadDialog] = useState(false);
+  const [deleteDialogResourceId, setDeleteDialogResourceId] = useState<string | null>(null);
 
   // Upload mutation
   const uploadMutation = useMutation({
     mutationFn: async (file: File) => {
-      // The upload endpoint takes the file and game_id as a query param
-      const token = localStorage.getItem("token");
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const response = await fetch(`/api/games/${id}/resources`, {
-        method: "POST",
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-        body: formData,
+      setUploadProgress(0);
+      return api.resources.upload(id!, file, (progress) => {
+        setUploadProgress(progress);
       });
-
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ detail: "Upload failed" }));
-        throw new Error(error.detail || "Upload failed");
-      }
-
-      return response.json();
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.resources.list(id!) });
       setUploadError(null);
+      setShowUploadDialog(false);
+
+      // Navigate to the resource details page immediately
+      navigate(`/admin/games/${id}/resources/${data.id}`);
+
+      // Track the processing workflow
+      if (data.status === "queued" || data.status === "processing") {
+        trackResource(data.id, data.name, {
+          onComplete: () => {
+            queryClient.invalidateQueries({ queryKey: queryKeys.resources.list(id!) });
+            queryClient.invalidateQueries({ queryKey: queryKeys.resources.detail(data.id) });
+          },
+        });
+      } else {
+        toast({
+          title: "Upload complete",
+          description: `"${data.name}" is ready`,
+          variant: "success",
+        });
+      }
     },
     onError: (err: Error) => {
       setUploadError(err.message);
+      toast({
+        title: "Upload failed",
+        description: err.message,
+        variant: "destructive",
+      });
     },
   });
 
   // Reprocess mutation
   const reprocessMutation = useMutation({
     mutationFn: (resourceId: string) => api.resources.reprocess(resourceId),
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.resources.list(id!) });
+
+      // Track the reprocessing workflow
+      trackResource(data.id, data.name, {
+        onComplete: () => {
+          queryClient.invalidateQueries({ queryKey: queryKeys.resources.list(id!) });
+        },
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Reprocess failed",
+        description: err.message,
+        variant: "destructive",
+      });
     },
   });
 
@@ -123,189 +145,225 @@ export default function ResourcesPage() {
     mutationFn: (resourceId: string) => api.resources.delete(resourceId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.resources.list(id!) });
+      setDeleteDialogResourceId(null); // Close dialog on success
+      toast({
+        description: "Resource deleted",
+        variant: "success",
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Delete failed",
+        description: err.message,
+        variant: "destructive",
+      });
     },
   });
 
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const handleFilesSelected = useCallback(
+    async (files: File[]) => {
+      const file = files[0];
+      if (!file) return;
 
-    setUploading(true);
-    setUploadError(null);
+      setUploading(true);
+      setUploadError(null);
+      setUploadProgress(0);
+      setShowUploadDialog(true);
 
-    try {
-      await uploadMutation.mutateAsync(file);
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
+      try {
+        await uploadMutation.mutateAsync(file);
+      } finally {
+        setUploading(false);
       }
-    }
-  };
+    },
+    [uploadMutation],
+  );
 
   if (isLoading) {
     return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <Skeleton className="h-8 w-48" />
+      <div className="space-y-4">
+        <div className="flex justify-end">
           <Skeleton className="h-10 w-32" />
         </div>
-        <Card>
-          <CardContent className="pt-6">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <Skeleton key={i} className="h-12 w-full mb-2" />
-            ))}
-          </CardContent>
-        </Card>
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Skeleton key={i} className="h-12 w-full" />
+        ))}
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Resources</h1>
-          <p className="text-muted-foreground">{game?.name} - Manage rulebooks and documents</p>
-        </div>
-        <div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf"
-            onChange={handleFileSelect}
-            className="hidden"
-          />
-          <Button onClick={() => fileInputRef.current?.click()} disabled={uploading}>
-            {uploading ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <Upload className="mr-2 h-4 w-4" />
-            )}
-            Upload PDF
-          </Button>
-        </div>
+    <div className="space-y-4">
+      {/* Upload button */}
+      <div className="flex justify-end">
+        <FileUpload
+          accept=".pdf"
+          variant="button"
+          buttonText="Upload PDF"
+          onFilesSelected={handleFilesSelected}
+          disabled={uploading}
+        />
       </div>
 
-      {uploadError && (
+      {/* Upload progress dialog */}
+      <Dialog
+        open={showUploadDialog}
+        onOpenChange={(open) => !uploading && setShowUploadDialog(open)}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {uploading ? "Uploading..." : uploadError ? "Upload Failed" : "Upload Complete"}
+            </DialogTitle>
+            <DialogDescription>
+              {uploading
+                ? "Please wait while your file is being uploaded."
+                : uploadError
+                  ? "There was a problem uploading your file."
+                  : "Your file has been uploaded and is now processing."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            {uploading && (
+              <div className="space-y-2">
+                <Progress value={uploadProgress} />
+                <p className="text-sm text-muted-foreground text-center">
+                  {uploadProgress}% complete
+                </p>
+              </div>
+            )}
+            {uploadError && (
+              <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                {uploadError}
+              </div>
+            )}
+            {!uploading && (
+              <div className="flex justify-end">
+                <Button variant="outline" onClick={() => setShowUploadDialog(false)}>
+                  Close
+                </Button>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {uploadError && !showUploadDialog && (
         <div className="rounded-md bg-destructive/10 p-4 text-sm text-destructive">
           {uploadError}
         </div>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">
-            {resources.length} {resources.length === 1 ? "Resource" : "Resources"}
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {error ? (
-            <div className="rounded-md bg-destructive/10 p-4 text-destructive">{error}</div>
-          ) : resources.length === 0 ? (
-            <div className="text-center py-8">
-              <FileText className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-              <p className="text-muted-foreground mb-4">No resources yet</p>
-              <Button onClick={() => fileInputRef.current?.click()}>
-                <Upload className="mr-2 h-4 w-4" />
-                Upload Your First PDF
-              </Button>
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Pages</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {resources.map((resource) => (
-                  <TableRow key={resource.id}>
-                    <TableCell className="font-medium">
-                      <Link
-                        to={`/admin/games/${id}/resources/${resource.id}`}
-                        className="hover:underline"
-                      >
-                        {resource.name}
-                      </Link>
-                      {resource.original_filename && (
-                        <div className="text-xs text-muted-foreground truncate max-w-[200px]">
-                          {resource.original_filename}
-                        </div>
+      {error ? (
+        <div className="rounded-md bg-destructive/10 p-4 text-destructive">{error.message}</div>
+      ) : resources.length === 0 ? (
+        <FileUpload
+          accept=".pdf"
+          variant="dropzone"
+          dropzoneText="Drop PDF here or click to browse"
+          maxSize={100 * 1024 * 1024}
+          onFilesSelected={handleFilesSelected}
+          disabled={uploading}
+        />
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead>Type</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Pages</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {resources.map((resource) => (
+              <TableRow key={resource.id}>
+                <TableCell className="font-medium">
+                  <Link
+                    to={`/admin/games/${id}/resources/${resource.id}`}
+                    className="hover:underline"
+                  >
+                    {resource.name}
+                  </Link>
+                  {resource.original_filename && (
+                    <div className="text-xs text-muted-foreground truncate max-w-[200px]">
+                      {resource.original_filename}
+                    </div>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline">{resource.resource_type}</Badge>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <StatusIcon status={resource.status} />
+                    <Badge variant={statusVariant(resource.status)}>{resource.status}</Badge>
+                    {resource.processing_stage && resource.status === "processing" && (
+                      <span className="text-xs text-muted-foreground">
+                        ({resource.processing_stage})
+                      </span>
+                    )}
+                  </div>
+                </TableCell>
+                <TableCell>{resource.page_count ?? "-"}</TableCell>
+                <TableCell className="text-right">
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => reprocessMutation.mutate(resource.id)}
+                      disabled={reprocessMutation.isPending || resource.status === "processing"}
+                    >
+                      {reprocessMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-4 w-4" />
                       )}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{resource.resource_type}</Badge>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <StatusIcon status={resource.status} />
-                        <Badge variant={statusVariant(resource.status)}>{resource.status}</Badge>
-                        {resource.processing_stage && resource.status === "processing" && (
-                          <span className="text-xs text-muted-foreground">
-                            ({resource.processing_stage})
-                          </span>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell>{resource.page_count ?? "-"}</TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => reprocessMutation.mutate(resource.id)}
-                          disabled={reprocessMutation.isPending || resource.status === "processing"}
-                        >
-                          {reprocessMutation.isPending ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <RefreshCw className="h-4 w-4" />
-                          )}
+                    </Button>
+                    <Dialog
+                      open={deleteDialogResourceId === resource.id}
+                      onOpenChange={(open) => setDeleteDialogResourceId(open ? resource.id : null)}
+                    >
+                      <DialogTrigger asChild>
+                        <Button variant="outline" size="sm">
+                          <Trash2 className="h-4 w-4 text-destructive" />
                         </Button>
-                        <Dialog>
-                          <DialogTrigger asChild>
-                            <Button variant="outline" size="sm">
-                              <Trash2 className="h-4 w-4 text-destructive" />
-                            </Button>
-                          </DialogTrigger>
-                          <DialogContent>
-                            <DialogHeader>
-                              <DialogTitle>Delete Resource?</DialogTitle>
-                              <DialogDescription>
-                                This will permanently delete "{resource.name}" and all its
-                                associated attachments and fragments.
-                              </DialogDescription>
-                            </DialogHeader>
-                            <div className="flex justify-end gap-2 mt-4">
-                              <Button
-                                variant="destructive"
-                                onClick={() => deleteMutation.mutate(resource.id)}
-                                disabled={deleteMutation.isPending}
-                              >
-                                {deleteMutation.isPending ? (
-                                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                ) : (
-                                  <Trash2 className="mr-2 h-4 w-4" />
-                                )}
-                                Delete
-                              </Button>
-                            </div>
-                          </DialogContent>
-                        </Dialog>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+                      </DialogTrigger>
+                      <DialogContent>
+                        <DialogHeader>
+                          <DialogTitle>Delete Resource?</DialogTitle>
+                          <DialogDescription>
+                            This will permanently delete "{resource.name}" and all its associated
+                            attachments and fragments.
+                          </DialogDescription>
+                        </DialogHeader>
+                        <div className="flex justify-end gap-2 mt-4">
+                          <Button variant="outline" onClick={() => setDeleteDialogResourceId(null)}>
+                            Cancel
+                          </Button>
+                          <Button
+                            variant="destructive"
+                            onClick={() => deleteMutation.mutate(resource.id)}
+                            disabled={deleteMutation.isPending}
+                          >
+                            {deleteMutation.isPending ? (
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="mr-2 h-4 w-4" />
+                            )}
+                            Delete
+                          </Button>
+                        </div>
+                      </DialogContent>
+                    </Dialog>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
     </div>
   );
 }

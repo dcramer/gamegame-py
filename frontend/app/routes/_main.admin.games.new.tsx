@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { api } from "~/api/client";
 import type { GameCreate } from "~/api/types";
+import { PageHeader } from "~/components/page-header";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
@@ -11,7 +12,8 @@ import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
 import { Skeleton } from "~/components/ui/skeleton";
 import { Textarea } from "~/components/ui/textarea";
-import { useBggSearch, useImportBggGame } from "~/hooks";
+import { useToast } from "~/contexts/toast";
+import { useBggSearch, useDebounce, useImportBggGame } from "~/hooks";
 import { queryKeys } from "~/lib/query";
 
 function slugify(text: string): string {
@@ -26,6 +28,7 @@ function slugify(text: string): string {
 export default function AddGamePage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   // Form state
   const [name, setName] = useState("");
@@ -37,9 +40,18 @@ export default function AddGamePage() {
 
   // BGG search state
   const [bggQuery, setBggQuery] = useState("");
+  const debouncedBggQuery = useDebounce(bggQuery, 400);
   const [showBggSearch, setShowBggSearch] = useState(true);
-  const { results: bggResults, isLoading: bggLoading } = useBggSearch(bggQuery);
+  const {
+    results: bggResults,
+    isLoading: bggLoading,
+    isFetching: bggFetching,
+    error: bggError,
+  } = useBggSearch(debouncedBggQuery);
   const importBggGame = useImportBggGame();
+
+  // Show loading when typing (debouncing) or when actually fetching
+  const isSearching = (bggQuery !== debouncedBggQuery && bggQuery.length >= 2) || bggFetching;
 
   // Auto-generate slug from name
   useEffect(() => {
@@ -53,13 +65,38 @@ export default function AddGamePage() {
     mutationFn: (data: GameCreate) => api.games.create(data),
     onSuccess: (game) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.games.all });
+      toast({
+        title: "Game created",
+        description: `"${game.name}" has been added`,
+        variant: "success",
+      });
       navigate(`/admin/games/${game.id}`);
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Failed to create game",
+        description: err.message,
+        variant: "destructive",
+      });
     },
   });
 
   const handleBggImport = async (bggId: number) => {
-    const result = await importBggGame.mutateAsync(bggId);
-    navigate(`/admin/games/${result.id}`);
+    try {
+      const result = await importBggGame.mutateAsync(bggId);
+      toast({
+        title: "Game imported",
+        description: `"${result.name}" has been imported from BoardGameGeek`,
+        variant: "success",
+      });
+      navigate(`/admin/games/${result.id}`);
+    } catch (err) {
+      toast({
+        title: "Import failed",
+        description: err instanceof Error ? err.message : "Failed to import game",
+        variant: "destructive",
+      });
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -78,10 +115,11 @@ export default function AddGamePage() {
 
   return (
     <div className="space-y-6 max-w-2xl">
-      <div>
-        <h1 className="text-2xl font-bold">Add Game</h1>
-        <p className="text-muted-foreground">Import from BoardGameGeek or create manually</p>
-      </div>
+      <PageHeader
+        breadcrumbs={[{ label: "Admin", to: "/admin" }, { label: "Add Game" }]}
+        title="Add Game"
+        description="Import from BoardGameGeek or create manually"
+      />
 
       {/* BGG Search */}
       {showBggSearch && (
@@ -99,7 +137,16 @@ export default function AddGamePage() {
                 onChange={(e) => setBggQuery(e.target.value)}
                 className="pl-9"
               />
+              {isSearching && (
+                <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground animate-spin" />
+              )}
             </div>
+
+            {bggError && (
+              <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                Failed to search BoardGameGeek: {bggError}
+              </div>
+            )}
 
             {bggLoading && (
               <div className="space-y-2">
@@ -110,7 +157,7 @@ export default function AddGamePage() {
             )}
 
             {bggResults.length > 0 && (
-              <div className="space-y-2 max-h-64 overflow-y-auto">
+              <div className="space-y-2">
                 {bggResults.map((result) => (
                   <div
                     key={result.bgg_id}

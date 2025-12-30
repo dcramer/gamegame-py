@@ -2,46 +2,9 @@
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from gamegame.models import Attachment, Game, Resource
-from gamegame.models.attachment import AttachmentType
-from gamegame.models.resource import ResourceStatus, ResourceType
 from tests.conftest import AuthenticatedClient
-
-
-@pytest.fixture
-async def resource(session: AsyncSession, game: Game) -> Resource:
-    """Create a test resource."""
-    resource = Resource(
-        game_id=game.id,  # type: ignore[arg-type]
-        name="Test Rulebook",
-        original_filename="rulebook.pdf",
-        url="/uploads/test.pdf",
-        content="",  # Required field
-        status=ResourceStatus.COMPLETED,
-        resource_type=ResourceType.RULEBOOK,
-    )
-    session.add(resource)
-    await session.flush()
-    return resource
-
-
-@pytest.fixture
-async def attachment(session: AsyncSession, game: Game, resource: Resource) -> Attachment:
-    """Create a test attachment."""
-    attachment = Attachment(
-        game_id=game.id,  # type: ignore[arg-type]
-        resource_id=resource.id,  # type: ignore[arg-type]
-        type=AttachmentType.IMAGE,
-        mime_type="image/png",
-        blob_key="test/image.png",  # Required field
-        url="/uploads/image.png",
-        page_number=1,
-    )
-    session.add(attachment)
-    await session.flush()
-    return attachment
 
 
 @pytest.mark.asyncio

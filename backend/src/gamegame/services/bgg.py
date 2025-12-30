@@ -26,14 +26,21 @@ BGG_RATE_LIMIT_KEY = "bgg:ratelimit"
 BGG_MAX_WAIT_MS = 30000  # Maximum wait time for rate limit
 BGG_USER_AGENT = "GameGame/1.0 (https://github.com/gamegame; contact@example.com)"
 
-# Retry configuration
-DEFAULT_MAX_RETRIES = 2
+# Retry configuration - BGG has strict rate limits, so no retries by default
+DEFAULT_MAX_RETRIES = 0
 DEFAULT_INITIAL_DELAY_MS = 3000
-IMAGE_MAX_RETRIES = 3
+IMAGE_MAX_RETRIES = 1  # Images are separate from BGG rate limit
 IMAGE_INITIAL_DELAY_MS = 1000
 
-# Shared httpx client headers
-BGG_HEADERS = {"User-Agent": BGG_USER_AGENT}
+
+def _get_bgg_headers() -> dict[str, str]:
+    """Get headers for BGG API requests including authentication."""
+    from gamegame.config import settings
+
+    headers = {"User-Agent": BGG_USER_AGENT}
+    if settings.bgg_api_key:
+        headers["Authorization"] = f"Bearer {settings.bgg_api_key}"
+    return headers
 
 
 @dataclass
@@ -302,7 +309,7 @@ async def _fetch_game_from_api(bgg_id: int) -> BGGGameInfo | None:
     # Apply rate limiting
     await _rate_limiter.acquire()
 
-    async with httpx.AsyncClient(headers=BGG_HEADERS) as client:
+    async with httpx.AsyncClient(headers=_get_bgg_headers()) as client:
         response = await client.get(url, timeout=10.0)
         response.raise_for_status()
 
@@ -425,7 +432,7 @@ async def _search_games_api(query: str, limit: int) -> list[BGGSearchResult]:
     # Apply rate limiting
     await _rate_limiter.acquire()
 
-    async with httpx.AsyncClient(headers=BGG_HEADERS) as client:
+    async with httpx.AsyncClient(headers=_get_bgg_headers()) as client:
         response = await client.get(url, timeout=10.0)
         response.raise_for_status()
 

@@ -3,17 +3,16 @@
 import logging
 from typing import Any
 
-import httpx
 from sqlmodel import select
 
 from gamegame.database import get_session_context
-from gamegame.models import Attachment, Game, Resource
-from gamegame.models.attachment import DetectedType
-from gamegame.services.pipeline.vision import (
-    ImageAnalysisContext,
-    ImageQuality,
-    analyze_single_image,
+from gamegame.models import Attachment, Resource
+from gamegame.services.attachment_analysis import (
+    build_attachment_context,
+    get_attachment_image_data,
+    update_attachment_from_analysis,
 )
+from gamegame.services.pipeline.vision import analyze_single_image
 from gamegame.services.workflow_tracking import (
     complete_workflow_run,
     fail_workflow_run,
@@ -66,47 +65,27 @@ async def analyze_attachment(
                 await session.commit()
                 return {"success": False, "error": error}
 
-            # Get game name for context
-            game_name = None
-            if attachment.game_id:
-                game_stmt = select(Game.name).where(Game.id == attachment.game_id)
-                game_result = await session.execute(game_stmt)
-                game_name = game_result.scalar_one_or_none()
-
-            # Get resource name for context
-            resource_name = None
+            # Get resource content for context extraction
+            resource_content = None
             if attachment.resource_id:
-                resource_stmt = select(Resource.name).where(Resource.id == attachment.resource_id)
+                resource_stmt = select(Resource.content).where(Resource.id == attachment.resource_id)
                 resource_result = await session.execute(resource_stmt)
-                resource_name = resource_result.scalar_one_or_none()
+                resource_content = resource_result.scalar_one_or_none()
 
-            # Fetch the image data
-            if not attachment.url:
-                error = "Attachment has no URL"
-                await fail_workflow_run(session, run_id, error, "NO_URL")
-                await session.commit()
-                return {"success": False, "error": error}
-
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(attachment.url, timeout=30.0)
-                    response.raise_for_status()
-                    image_data = response.content
-            except Exception as e:
-                error = f"Failed to fetch image: {e}"
-                logger.error(f"Failed to fetch attachment {attachment_id}: {e}")
-                await fail_workflow_run(session, run_id, error, "FETCH_ERROR")
-                await session.commit()
-                return {"success": False, "error": error}
-
-            # Build context
-            context = ImageAnalysisContext(
-                page_number=attachment.page_number or 1,
-                game_name=game_name,
-                resource_name=resource_name,
-                section=None,
-                surrounding_text=None,
+            # Build context using shared function
+            context = await build_attachment_context(
+                session, attachment, resource_content=resource_content
             )
+
+            # Read the image data from storage
+            try:
+                image_data = await get_attachment_image_data(attachment)
+            except ValueError as e:
+                error = str(e)
+                logger.error(f"Failed to read attachment {attachment_id}: {e}")
+                await fail_workflow_run(session, run_id, error, "READ_ERROR")
+                await session.commit()
+                return {"success": False, "error": error}
 
             # Analyze the image
             try:
@@ -118,18 +97,14 @@ async def analyze_attachment(
                 await session.commit()
                 return {"success": False, "error": error}
 
-            # Update the attachment with results
-            attachment.description = analysis.description
-            attachment.detected_type = DetectedType(analysis.image_type.value)
-            attachment.is_good_quality = analysis.quality == ImageQuality.GOOD
-            attachment.is_relevant = analysis.relevant
-            attachment.ocr_text = analysis.ocr_text
+            # Update the attachment with results using shared function
+            update_attachment_from_analysis(attachment, analysis)
 
             # Mark workflow as completed
             output_data = {
                 "description": analysis.description,
                 "detected_type": analysis.image_type.value,
-                "is_good_quality": analysis.quality == ImageQuality.GOOD,
+                "is_good_quality": analysis.quality.value == "good",
                 "is_relevant": analysis.relevant,
             }
             await complete_workflow_run(session, run_id, output_data)

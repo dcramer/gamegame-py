@@ -7,6 +7,7 @@ import type {
   ChatMessage,
   ChatResponse,
   DetectedType,
+  FileUploadResponse,
   Game,
   GameCreate,
   GameUpdate,
@@ -18,7 +19,6 @@ import type {
   ResourceUpdate,
   SearchResponse,
   TokenResponse,
-  UploadResponse,
   User,
   WorkflowRun,
   WorkflowStatus,
@@ -33,6 +33,18 @@ function getStoredToken(): string | null {
   return localStorage.getItem("token");
 }
 
+// Clear token and redirect to login (SSR-safe)
+function handleAuthFailure(): void {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem("token");
+  // Dispatch event so AuthContext can sync
+  window.dispatchEvent(new StorageEvent("storage", { key: "token", newValue: null }));
+  // Redirect to login if not already there
+  if (!window.location.pathname.startsWith("/auth/")) {
+    window.location.href = "/auth/signin";
+  }
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -43,25 +55,64 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+// Default timeout for requests (30 seconds)
+const DEFAULT_TIMEOUT = 30000;
+
+async function request<T>(
+  path: string,
+  options: RequestInit & { timeout?: number; skipAuth?: boolean } = {},
+): Promise<T> {
+  const { timeout = DEFAULT_TIMEOUT, skipAuth = false, ...fetchOptions } = options;
   const token = getStoredToken();
 
   const headers: HeadersInit = {
     "Content-Type": "application/json",
-    ...options.headers,
+    ...fetchOptions.headers,
   };
 
-  if (token) {
+  if (token && !skipAuth) {
     (headers as Record<string, string>)["Authorization"] = `Bearer ${token}`;
   }
 
-  const response = await fetch(`${BASE_URL}${path}`, {
-    ...options,
-    headers,
-  });
+  // Create AbortController for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  // Combine with any existing signal
+  const signal = fetchOptions.signal
+    ? combineAbortSignals(fetchOptions.signal, controller.signal)
+    : controller.signal;
+
+  let response: Response;
+  try {
+    response = await fetch(`${BASE_URL}${path}`, {
+      ...fetchOptions,
+      headers,
+      signal,
+    });
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err instanceof Error) {
+      if (err.name === "AbortError") {
+        throw new ApiError(0, "Request timed out");
+      }
+      // Network error (no internet, DNS failure, etc.)
+      throw new ApiError(0, `Network error: ${err.message}`);
+    }
+    throw new ApiError(0, "Unknown network error");
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: "Unknown error" }));
+
+    // Handle 401 Unauthorized - token expired or invalid
+    if (response.status === 401 && !skipAuth) {
+      handleAuthFailure();
+      throw new ApiError(401, "Session expired. Please sign in again.");
+    }
+
     throw new ApiError(response.status, error.detail || "Request failed");
   }
 
@@ -73,11 +124,25 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json();
 }
 
+// Helper to combine multiple AbortSignals
+function combineAbortSignals(...signals: AbortSignal[]): AbortSignal {
+  const controller = new AbortController();
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort();
+      break;
+    }
+    signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  return controller.signal;
+}
+
 // Special request for file uploads (multipart/form-data)
 async function uploadRequest<T>(
   path: string,
   file: File,
   queryParams?: Record<string, string>,
+  timeout: number = 120000, // 2 minutes for uploads
 ): Promise<T> {
   const token = getStoredToken();
 
@@ -93,18 +158,106 @@ async function uploadRequest<T>(
     ? `${BASE_URL}${path}?${new URLSearchParams(queryParams)}`
     : `${BASE_URL}${path}`;
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body: formData,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: formData,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err instanceof Error) {
+      if (err.name === "AbortError") {
+        throw new ApiError(0, "Upload timed out");
+      }
+      console.error("Upload network error:", err);
+      throw new ApiError(0, `Network error: ${err.message}`);
+    }
+    throw new ApiError(0, "Unknown network error");
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: "Unknown error" }));
+    if (response.status === 401) {
+      handleAuthFailure();
+      throw new ApiError(401, "Session expired. Please sign in again.");
+    }
     throw new ApiError(response.status, error.detail || "Upload failed");
   }
 
   return response.json();
+}
+
+// Upload with progress callback using XMLHttpRequest
+function uploadWithProgress<T>(
+  path: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+  timeout: number = 120000, // 2 minutes for uploads
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const token = getStoredToken();
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    // Set timeout
+    xhr.timeout = timeout;
+
+    xhr.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable && onProgress) {
+        const percent = Math.round((event.loaded / event.total) * 100);
+        onProgress(percent);
+      }
+    });
+
+    xhr.addEventListener("load", () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText));
+        } catch {
+          reject(new ApiError(xhr.status, "Invalid JSON response"));
+        }
+      } else if (xhr.status === 401) {
+        handleAuthFailure();
+        reject(new ApiError(401, "Session expired. Please sign in again."));
+      } else {
+        try {
+          const error = JSON.parse(xhr.responseText);
+          reject(new ApiError(xhr.status, error.detail || "Upload failed"));
+        } catch {
+          reject(new ApiError(xhr.status, "Upload failed"));
+        }
+      }
+    });
+
+    xhr.addEventListener("error", () => {
+      console.error("Upload network error");
+      reject(new ApiError(0, "Network error"));
+    });
+
+    xhr.addEventListener("abort", () => {
+      reject(new ApiError(0, "Upload aborted"));
+    });
+
+    xhr.addEventListener("timeout", () => {
+      reject(new ApiError(0, "Upload timed out"));
+    });
+
+    xhr.open("POST", `${BASE_URL}${path}`);
+    if (token) {
+      xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    }
+    xhr.send(formData);
+  });
 }
 
 export const api = {
@@ -189,6 +342,9 @@ export const api = {
     list: (gameIdOrSlug: string) => request<Resource[]>(`/games/${gameIdOrSlug}/resources`),
 
     get: (id: string) => request<Resource>(`/resources/${id}`),
+
+    upload: (gameIdOrSlug: string, file: File, onProgress?: (percent: number) => void) =>
+      uploadWithProgress<Resource>(`/games/${gameIdOrSlug}/resources`, file, onProgress),
 
     update: (id: string, data: ResourceUpdate) =>
       request<Resource>(`/resources/${id}`, {
@@ -286,7 +442,7 @@ export const api = {
   // ============================================================================
   upload: {
     file: (file: File, type?: "image" | "pdf") =>
-      uploadRequest<UploadResponse>("/upload", file, type ? { type } : undefined),
+      uploadRequest<FileUploadResponse>("/upload", file, type ? { type } : undefined),
   },
 
   // ============================================================================
@@ -321,6 +477,7 @@ export const api = {
     stream: async function* (
       gameIdOrSlug: string,
       messages: ChatMessage[],
+      signal?: AbortSignal,
     ): AsyncGenerator<string, void, unknown> {
       const token = getStoredToken();
 
@@ -332,42 +489,86 @@ export const api = {
         headers["Authorization"] = `Bearer ${token}`;
       }
 
-      const response = await fetch(`${BASE_URL}/games/${gameIdOrSlug}/chat`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ messages, stream: true }),
-      });
+      // Create combined controller for timeout and external signal
+      const controller = new AbortController();
+      const STREAM_TIMEOUT = 60000; // 60 seconds for initial response
+      const READ_TIMEOUT = 30000; // 30 seconds between chunks
+      let timeoutId = setTimeout(() => controller.abort(), STREAM_TIMEOUT);
+
+      // Combine with external signal if provided
+      const combinedSignal = signal
+        ? combineAbortSignals(signal, controller.signal)
+        : controller.signal;
+
+      let response: Response;
+      try {
+        response = await fetch(`${BASE_URL}/games/${gameIdOrSlug}/chat`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ messages, stream: true }),
+          signal: combinedSignal,
+        });
+      } catch (err) {
+        clearTimeout(timeoutId);
+        if (err instanceof Error) {
+          if (err.name === "AbortError") {
+            throw new ApiError(0, "Chat request timed out");
+          }
+          throw new ApiError(0, `Network error: ${err.message}`);
+        }
+        throw new ApiError(0, "Unknown network error");
+      }
 
       if (!response.ok) {
+        clearTimeout(timeoutId);
         const error = await response.json().catch(() => ({ detail: "Unknown error" }));
+        if (response.status === 401) {
+          handleAuthFailure();
+          throw new ApiError(401, "Session expired. Please sign in again.");
+        }
         throw new ApiError(response.status, error.detail || "Chat request failed");
       }
 
       const reader = response.body?.getReader();
       if (!reader) {
-        throw new Error("No response body");
+        clearTimeout(timeoutId);
+        throw new ApiError(0, "No response body");
       }
 
       const decoder = new TextDecoder();
       let buffer = "";
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      try {
+        while (true) {
+          // Reset timeout for each read
+          clearTimeout(timeoutId);
+          timeoutId = setTimeout(() => controller.abort(), READ_TIMEOUT);
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            const data = line.slice(6);
-            if (data === "[DONE]") {
-              return;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              const data = line.slice(6);
+              if (data === "[DONE]") {
+                return;
+              }
+              yield data;
             }
-            yield data;
           }
         }
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          throw new ApiError(0, "Chat stream timed out");
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+        reader.releaseLock();
       }
     },
   },
@@ -422,13 +623,17 @@ export const api = {
   workflows: {
     list: (options?: {
       runIds?: string[];
+      resourceIds?: string[];
       status?: WorkflowStatus;
       limit?: number;
       offset?: number;
     }) => {
       const params = new URLSearchParams();
       if (options?.runIds) {
-        options.runIds.forEach((id) => params.append("runId", id));
+        for (const id of options.runIds) params.append("runId", id);
+      }
+      if (options?.resourceIds) {
+        for (const id of options.resourceIds) params.append("resourceId", id);
       }
       if (options?.status) params.set("status", options.status);
       if (options?.limit) params.set("limit", options.limit.toString());

@@ -7,11 +7,10 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from gamegame.api.deps import AdminUser, SessionDep
-from gamegame.models import Resource, WorkflowRun, WorkflowStatus
+from gamegame.models import Resource, WorkflowRun
 from gamegame.models.resource import ResourceStatus
-from gamegame.models.workflow_run import WorkflowRunRead
-from gamegame.tasks import queue
-from gamegame.tasks.queue import PIPELINE_TIMEOUT_SECONDS
+from gamegame.models.workflow_run import MAX_WORKFLOW_RETRIES, WorkflowRunRead
+from gamegame.tasks.queue import PIPELINE_TIMEOUT_SECONDS, enqueue, queue
 
 router = APIRouter()
 
@@ -21,7 +20,8 @@ async def list_workflows(
     session: SessionDep,
     _user: AdminUser,
     run_ids: Annotated[list[str] | None, Query(alias="runId")] = None,
-    status_filter: Annotated[WorkflowStatus | None, Query(alias="status")] = None,
+    resource_ids: Annotated[list[str] | None, Query(alias="resourceId")] = None,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
 ):
@@ -29,6 +29,7 @@ async def list_workflows(
 
     Query parameters:
         runId: Filter by specific run IDs (can be multiple)
+        resourceId: Filter by specific resource IDs (can be multiple)
         status: Filter by status
         limit: Maximum number of results (default 20, max 100)
         offset: Offset for pagination
@@ -38,6 +39,9 @@ async def list_workflows(
     # Apply filters
     if run_ids:
         stmt = stmt.where(WorkflowRun.run_id.in_(run_ids))  # type: ignore[attr-defined]
+
+    if resource_ids:
+        stmt = stmt.where(WorkflowRun.resource_id.in_(resource_ids))  # type: ignore[attr-defined]
 
     if status_filter:
         stmt = stmt.where(WorkflowRun.status == status_filter)
@@ -109,10 +113,18 @@ async def retry_workflow(
             detail=f"Workflow run '{run_id}' not found",
         )
 
-    if workflow.status != WorkflowStatus.FAILED:
+    if workflow.status != "failed":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot retry workflow with status '{workflow.status}'. Only failed workflows can be retried.",
+        )
+
+    # Check retry limit
+    retry_count = (workflow.extra_data or {}).get("retry_count", 0)
+    if retry_count >= MAX_WORKFLOW_RETRIES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Maximum retry limit ({MAX_WORKFLOW_RETRIES}) reached for this workflow.",
         )
 
     # Handle retry based on workflow type
@@ -135,14 +147,13 @@ async def retry_workflow(
 
         await session.commit()
 
-        # Enqueue new processing task
-        job = await queue.enqueue(
+        # Enqueue new processing task with incremented retry count
+        new_run_id = await enqueue(
             "process_resource",
             resource_id=workflow.resource_id,
+            retry_count=retry_count + 1,
             timeout=PIPELINE_TIMEOUT_SECONDS,
         )
-
-        new_run_id = job.id if job else None
 
         return RetryResponse(
             success=True,
@@ -178,7 +189,7 @@ async def cancel_workflow(
             detail=f"Workflow run '{run_id}' not found",
         )
 
-    if workflow.status not in (WorkflowStatus.QUEUED, WorkflowStatus.RUNNING):
+    if workflow.status not in ("queued", "running"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Cannot cancel workflow with status '{workflow.status}'",
@@ -194,7 +205,7 @@ async def cancel_workflow(
         pass
 
     # Update workflow status
-    workflow.status = WorkflowStatus.CANCELLED
+    workflow.status = "cancelled"
     workflow.extra_data = {**(workflow.extra_data or {}), "cancelled_by": "admin"}
 
     # If processing resource, reset to ready

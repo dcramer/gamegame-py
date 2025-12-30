@@ -11,6 +11,7 @@ uv = "latest"
 
 [env]
 _.file = ".env"
+ENVIRONMENT = "development"
 PYTHONDONTWRITEBYTECODE = "1"
 
 # =============================================================================
@@ -30,7 +31,7 @@ echo "Installing backend dependencies..."
 cd backend && uv sync --all-extras
 
 echo "Installing frontend dependencies..."
-cd frontend && npm install
+cd frontend && pnpm install
 
 echo "Running database migrations..."
 cd backend && uv run alembic upgrade head
@@ -51,7 +52,7 @@ run = "uv run uvicorn gamegame.main:app --reload --port 8000"
 [tasks.frontend]
 description = "Start frontend server only"
 dir = "frontend"
-run = "npm run dev"
+run = "pnpm dev"
 
 [tasks.worker]
 description = "Start background task worker"
@@ -115,28 +116,28 @@ run = "docker compose up -d postgres-test"
 description = "Run linters (backend + frontend)"
 run = [
     "cd backend && uv run ruff check .",
-    "cd frontend && npm run lint"
+    "cd frontend && pnpm lint"
 ]
 
 [tasks."lint:fix"]
 description = "Fix linting issues"
 run = [
     "cd backend && uv run ruff check --fix .",
-    "cd frontend && npm run lint:fix"
+    "cd frontend && pnpm lint:fix"
 ]
 
 [tasks.format]
 description = "Format code (backend + frontend)"
 run = [
     "cd backend && uv run ruff format .",
-    "cd frontend && npm run format"
+    "cd frontend && pnpm format"
 ]
 
 [tasks.typecheck]
 description = "Run type checkers"
 run = [
     "cd backend && uv run ty check",
-    "cd frontend && npm run typecheck"
+    "cd frontend && pnpm typecheck"
 ]
 
 [tasks.check]
@@ -205,5 +206,5 @@ echo "Cleaned build artifacts"
 description = "Install all dependencies"
 run = [
     "cd backend && uv sync --all-extras",
-    "cd frontend && npm install"
+    "cd frontend && pnpm install"
 ]

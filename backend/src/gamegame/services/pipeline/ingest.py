@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from mistralai import Mistral
 from tenacity import (
     AsyncRetrying,
+    before_sleep_log,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -83,6 +84,7 @@ async def ingest_document(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=2, max=30),
             retry=retry_if_exception_type(MISTRAL_RETRYABLE),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
             reraise=True,
         ):
             with attempt:

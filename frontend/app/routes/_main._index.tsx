@@ -35,7 +35,7 @@ export default function GamesPage({ loaderData }: Route.ComponentProps) {
   );
 
   return (
-    <div className="container mx-auto px-4 py-8">
+    <>
       <section className="text-center py-3 lg:py-12">
         <h1 className="text-2xl lg:text-5xl lg:mb-6 mb-2 font-bold">What are you playing?</h1>
         <p className="text-lg lg:text-xl mb-4 lg:mb-8 text-muted-foreground">
@@ -53,21 +53,18 @@ export default function GamesPage({ loaderData }: Route.ComponentProps) {
           {matchingGames.map((game) => (
             <Card
               key={game.id}
-              className="relative rounded-lg overflow-hidden border-2 border-border hover:border-primary hover:scale-105 transition-all duration-200 hover:shadow-2xl hover:shadow-primary/20 group"
+              className="relative rounded-lg overflow-hidden border-2 border-border hover:border-primary transition-colors group"
             >
               <div className="w-full aspect-[3/2] overflow-hidden relative bg-muted flex items-center justify-center">
                 {game.image_url && !imageErrors.has(game.id) ? (
-                  <>
-                    <img
-                      src={game.image_url}
-                      alt={game.name}
-                      className="w-full h-full object-cover object-top group-hover:scale-110 transition-transform duration-200"
-                      onError={() => {
-                        setImageErrors((prev) => new Set(prev).add(game.id));
-                      }}
-                    />
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200" />
-                  </>
+                  <img
+                    src={game.image_url}
+                    alt={game.name}
+                    className="w-full h-full object-cover object-top group-hover:scale-105 transition-transform duration-300"
+                    onError={() => {
+                      setImageErrors((prev) => new Set(prev).add(game.id));
+                    }}
+                  />
                 ) : (
                   <Dices className="w-16 h-16 text-muted-foreground" />
                 )}
@@ -94,6 +91,6 @@ export default function GamesPage({ loaderData }: Route.ComponentProps) {
           </div>
         )}
       </div>
-    </div>
+    </>
   );
 }

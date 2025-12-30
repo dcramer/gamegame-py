@@ -5,27 +5,18 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from gamegame.models import Game, Resource, WorkflowRun, WorkflowStatus
+from gamegame.models import Resource, WorkflowRun, WorkflowStatus
 from gamegame.models.resource import ResourceStatus
 from tests.conftest import AuthenticatedClient
 
 
 @pytest.fixture
-async def game(session):
-    """Create a test game."""
-    game = Game(name="Test Game", slug="test-game")
-    session.add(game)
-    await session.commit()
-    await session.refresh(game)
-    return game
-
-
-@pytest.fixture
-async def resource(session, game):
-    """Create a test resource."""
+async def processing_resource(session: AsyncSession, game) -> Resource:
+    """Create a test resource in PROCESSING state (for workflow tests)."""
     resource = Resource(
-        game_id=game.id,
+        game_id=game.id,  # type: ignore[arg-type]
         name="Test Resource",
         original_filename="test.pdf",
         url="/uploads/test.pdf",
@@ -33,25 +24,23 @@ async def resource(session, game):
         status=ResourceStatus.PROCESSING,
     )
     session.add(resource)
-    await session.commit()
-    await session.refresh(resource)
+    await session.flush()
     return resource
 
 
 @pytest.fixture
-async def workflow_run(session, resource):
+async def workflow_run(session: AsyncSession, processing_resource: Resource) -> WorkflowRun:
     """Create a test workflow run."""
     workflow = WorkflowRun(
         run_id="test-run-123",
         workflow_name="process_resource",
         status=WorkflowStatus.RUNNING,
         started_at=datetime.now(UTC),
-        resource_id=resource.id,
-        input_data={"resource_id": resource.id},
+        resource_id=processing_resource.id,
+        input_data={"resource_id": processing_resource.id},
     )
     session.add(workflow)
-    await session.commit()
-    await session.refresh(workflow)
+    await session.flush()
     return workflow
 
 
@@ -99,7 +88,7 @@ async def test_list_workflows_filter_by_run_id(admin_client: AuthenticatedClient
         status=WorkflowStatus.COMPLETED,
     )
     session.add(workflow2)
-    await session.commit()
+    await session.flush()
 
     response = await admin_client.get("/api/admin/workflows?runId=test-run-123")
     assert response.status_code == 200
@@ -118,7 +107,7 @@ async def test_list_workflows_filter_by_status(admin_client: AuthenticatedClient
         status=WorkflowStatus.COMPLETED,
     )
     session.add(workflow2)
-    await session.commit()
+    await session.flush()
 
     response = await admin_client.get("/api/admin/workflows?status=completed")
     assert response.status_code == 200
@@ -176,23 +165,21 @@ async def test_retry_workflow_not_failed(admin_client: AuthenticatedClient, work
 
 
 @pytest.mark.asyncio
-async def test_retry_workflow_success(admin_client: AuthenticatedClient, session, resource):
+async def test_retry_workflow_success(admin_client: AuthenticatedClient, session, processing_resource):
     """Test successfully retrying a failed workflow."""
     # Create failed workflow
     failed_workflow = WorkflowRun(
         run_id="failed-run-123",
         workflow_name="process_resource",
         status=WorkflowStatus.FAILED,
-        resource_id=resource.id,
+        resource_id=processing_resource.id,
         error="Processing failed",
     )
     session.add(failed_workflow)
-    await session.commit()
+    await session.flush()
 
-    with patch("gamegame.api.workflows.queue") as mock_queue:
-        mock_job = AsyncMock()
-        mock_job.id = "new-run-456"
-        mock_queue.enqueue = AsyncMock(return_value=mock_job)
+    with patch("gamegame.api.workflows.enqueue", new_callable=AsyncMock) as mock_enqueue:
+        mock_enqueue.return_value = "new-run-456"
 
         response = await admin_client.post("/api/admin/workflows/failed-run-123/retry")
         assert response.status_code == 200
@@ -224,14 +211,16 @@ async def test_cancel_workflow_already_completed(admin_client: AuthenticatedClie
         status=WorkflowStatus.COMPLETED,
     )
     session.add(completed_workflow)
-    await session.commit()
+    await session.flush()
 
     response = await admin_client.delete("/api/admin/workflows/completed-run")
     assert response.status_code == 400
 
 
 @pytest.mark.asyncio
-async def test_cancel_workflow_success(admin_client: AuthenticatedClient, session, workflow_run, resource):
+async def test_cancel_workflow_success(
+    admin_client: AuthenticatedClient, session, workflow_run, processing_resource
+):
     """Test successfully cancelling a running workflow."""
     with patch("gamegame.api.workflows.queue") as mock_queue:
         mock_job = AsyncMock()
@@ -248,5 +237,5 @@ async def test_cancel_workflow_success(admin_client: AuthenticatedClient, sessio
     assert workflow_run.status == WorkflowStatus.CANCELLED
 
     # Verify resource was reset
-    await session.refresh(resource)
-    assert resource.status == ResourceStatus.READY
+    await session.refresh(processing_resource)
+    assert processing_resource.status == ResourceStatus.READY

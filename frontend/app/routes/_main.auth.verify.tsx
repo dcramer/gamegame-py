@@ -1,5 +1,5 @@
 import { CheckCircle, XCircle } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
@@ -17,6 +17,20 @@ export default function VerifyPage() {
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState<string>("");
 
+  // Track if verification has been attempted to prevent duplicates
+  const verificationAttemptedRef = useRef(false);
+  const isMountedRef = useRef(true);
+
+  // Get token once on mount
+  const token = searchParams.get("token");
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   useEffect(() => {
     // Only run on client
     if (typeof window === "undefined") return;
@@ -27,20 +41,31 @@ export default function VerifyPage() {
       return;
     }
 
-    const token = searchParams.get("token");
     if (!token) {
       setStatus("error");
       setErrorMessage("No verification token provided");
       return;
     }
 
+    // Prevent duplicate verification attempts (e.g., from back/forward navigation)
+    if (verificationAttemptedRef.current) {
+      return;
+    }
+    verificationAttemptedRef.current = true;
+
     const verifyToken = async () => {
       const success = await verify(token);
+
+      // Check if still mounted before updating state
+      if (!isMountedRef.current) return;
+
       if (success) {
         setStatus("success");
         // Redirect after a short delay
         setTimeout(() => {
-          navigate("/", { replace: true });
+          if (isMountedRef.current) {
+            navigate("/", { replace: true });
+          }
         }, 1500);
       } else {
         setStatus("error");
@@ -49,7 +74,7 @@ export default function VerifyPage() {
     };
 
     verifyToken();
-  }, [searchParams, verify, navigate, isAuthenticated]);
+  }, [token, verify, navigate, isAuthenticated]);
 
   return (
     <div className="container mx-auto flex min-h-[60vh] items-center justify-center px-4">

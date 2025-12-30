@@ -4,67 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from gamegame.models import Attachment, Game, Resource
-from gamegame.models.attachment import AttachmentType, DetectedType, QualityRating
-from gamegame.models.resource import ResourceStatus
-
-
-@pytest.fixture
-async def resource(session: AsyncSession, game: Game) -> Resource:
-    """Create a test resource."""
-    resource = Resource(
-        game_id=game.id,
-        name="Test Rulebook",
-        original_filename="test-rulebook.pdf",
-        url="/uploads/test.pdf",
-        status=ResourceStatus.COMPLETED,
-        content="This is a test rulebook with setup instructions.",
-    )
-    session.add(resource)
-    await session.flush()
-    return resource
-
-
-@pytest.fixture
-async def attachment(session: AsyncSession, game: Game, resource: Resource) -> Attachment:
-    """Create a test attachment."""
-    attachment = Attachment(
-        game_id=game.id,
-        resource_id=resource.id,
-        type=AttachmentType.IMAGE,
-        mime_type="image/png",
-        blob_key="test/test.png",  # Required field
-        url="/uploads/test.png",
-        page_number=1,
-        description="A diagram showing game setup",
-        detected_type=DetectedType.DIAGRAM,
-        is_good_quality=QualityRating.GOOD,
-        ocr_text="Setup: Place tokens on board",
-    )
-    session.add(attachment)
-    await session.flush()
-    return attachment
-
-
-def mock_openai_response(content: str = "This is a test response."):
-    """Create a mock OpenAI response."""
-    mock_message = MagicMock()
-    mock_message.content = content
-    mock_message.tool_calls = None
-    mock_message.model_dump.return_value = {
-        "role": "assistant",
-        "content": content,
-    }
-
-    mock_choice = MagicMock()
-    mock_choice.message = mock_message
-
-    mock_response = MagicMock()
-    mock_response.choices = [mock_choice]
-
-    return mock_response
+from tests.conftest import make_openai_chat_response
 
 
 @pytest.mark.asyncio
@@ -91,7 +33,7 @@ async def test_chat_empty_messages(client: AsyncClient, game: Game):
 @pytest.mark.asyncio
 async def test_chat_success(client: AsyncClient, game: Game, resource: Resource):
     """Test successful chat request."""
-    mock_response = mock_openai_response("The game setup requires placing tokens on the board.")
+    mock_response = make_openai_chat_response("The game setup requires placing tokens on the board.")
 
     with (
         patch("gamegame.services.chat.settings") as mock_settings,
@@ -118,7 +60,7 @@ async def test_chat_success(client: AsyncClient, game: Game, resource: Resource)
 @pytest.mark.asyncio
 async def test_chat_by_slug(client: AsyncClient, game: Game, resource: Resource):
     """Test chat using game slug instead of ID."""
-    mock_response = mock_openai_response("Test response")
+    mock_response = make_openai_chat_response("Test response")
 
     with (
         patch("gamegame.services.chat.settings") as mock_settings,
@@ -162,7 +104,7 @@ async def test_chat_with_tool_call(client: AsyncClient, game: Game, resource: Re
     mock_response_with_tool.choices = [mock_choice_with_tool]
 
     # Final response after tool execution
-    mock_final_response = mock_openai_response("Based on the rulebook, setup involves...")
+    mock_final_response = make_openai_chat_response("Based on the rulebook, setup involves...")
 
     with (
         patch("gamegame.services.chat.settings") as mock_settings,
@@ -215,7 +157,7 @@ async def test_chat_search_images_tool(
     mock_response_with_tool = MagicMock()
     mock_response_with_tool.choices = [mock_choice_with_tool]
 
-    mock_final_response = mock_openai_response("I found a diagram showing the setup.")
+    mock_final_response = make_openai_chat_response("I found a diagram showing the setup.")
 
     with (
         patch("gamegame.services.chat.settings") as mock_settings,
@@ -263,7 +205,7 @@ async def test_chat_list_resources_tool(
     mock_response_with_tool = MagicMock()
     mock_response_with_tool.choices = [mock_choice_with_tool]
 
-    mock_final_response = mock_openai_response("The game has a rulebook available.")
+    mock_final_response = make_openai_chat_response("The game has a rulebook available.")
 
     with (
         patch("gamegame.services.chat.settings") as mock_settings,

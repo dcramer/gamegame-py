@@ -7,11 +7,14 @@ export function useBggSearch(query: string, enabled: boolean = true) {
     queryKey: queryKeys.bgg.search(query),
     queryFn: () => api.bgg.search(query),
     enabled: enabled && query.length >= 2,
+    retry: false, // BGG has strict rate limits, don't retry
+    staleTime: 1000 * 60 * 10, // Cache for 10 minutes
   });
 
   return {
     results: result.data ?? [],
     isLoading: result.isLoading,
+    isFetching: result.isFetching,
     error: result.error?.message ?? null,
   };
 }

@@ -49,6 +49,7 @@ class Attachment(TimestampMixin, SQLModel, table=True):
     blob_key: str = Field(max_length=500)
     url: str = Field(max_length=2048)
     original_filename: str | None = Field(default=None, max_length=255)
+    content_hash: str | None = Field(default=None, max_length=64, index=True, description="SHA256 hash of image bytes")
 
     # Location
     page_number: int | None = Field(default=None)

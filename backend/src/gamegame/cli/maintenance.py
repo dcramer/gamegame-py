@@ -121,6 +121,76 @@ def prune_workflows(
     asyncio.run(_prune())
 
 
+@app.command("recover-stalled")
+def recover_stalled(
+    stall_threshold: int = typer.Option(
+        45, "--threshold", "-t", help="Minutes without activity before a job is considered stalled"
+    ),
+    dry_run: bool = typer.Option(True, "--dry-run/--execute", help="Only report, don't recover"),
+    background: bool = typer.Option(False, "--background", "-b", help="Run in background worker"),
+):
+    """Find and recover stalled workflows.
+
+    Detects workflows that have been in 'running' status with no activity
+    (progress updates) for too long and marks them as failed so they can be retried.
+    """
+
+    async def _recover():
+        if background:
+            job = await queue.enqueue(
+                "recover_stalled_workflows",
+                stall_threshold_seconds=stall_threshold * 60,
+                dry_run=dry_run,
+                timeout=MAINTENANCE_TIMEOUT_SECONDS,
+            )
+            console.print(f"[green]Queued stall recovery job:[/green] {job.id if job else 'unknown'}")
+            return
+
+        from gamegame.tasks.maintenance import recover_stalled_workflows
+
+        console.print(f"[cyan]Scanning for workflows with no activity for >{stall_threshold} minutes...[/cyan]")
+
+        result = await recover_stalled_workflows(
+            ctx={},
+            stall_threshold_seconds=stall_threshold * 60,
+            dry_run=dry_run,
+        )
+
+        if not result.get("success"):
+            console.print(f"[red]Error:[/red] {result.get('error')}")
+            raise typer.Exit(1)
+
+        stalled = result.get("stalled_count", 0)
+        recovered = result.get("recovered_count", 0)
+
+        if stalled == 0:
+            console.print("[green]No stalled workflows found.[/green]")
+            return
+
+        # Display results
+        table = Table(title="Stalled Workflow Recovery")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", justify="right")
+
+        table.add_row("Stalled Workflows Found", str(stalled))
+
+        if dry_run:
+            table.add_row("Would Recover", str(recovered))
+        else:
+            table.add_row("Recovered", str(recovered))
+            failed = result.get("failed_recoveries", [])
+            if failed:
+                table.add_row("Failed", str(len(failed)))
+
+        console.print(table)
+
+        if dry_run and stalled > 0:
+            console.print("\n[yellow]Dry run mode - no workflows were modified.[/yellow]")
+            console.print("Run with --execute to recover stalled workflows.")
+
+    asyncio.run(_recover())
+
+
 @app.command("storage-stats")
 def storage_stats():
     """Show storage usage statistics."""

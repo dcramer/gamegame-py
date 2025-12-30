@@ -41,6 +41,7 @@ export {
 } from "./dropdown-menu";
 export { Input } from "./input";
 export { Label } from "./label";
+export { Progress } from "./progress";
 export { ScrollArea, ScrollBar } from "./scroll-area";
 export {
   Select,

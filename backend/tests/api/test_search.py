@@ -7,53 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gamegame.models import Fragment, Game, Resource
 from gamegame.models.fragment import FragmentType
-from gamegame.models.resource import ResourceStatus, ResourceType
-
-
-@pytest.fixture
-async def resource(session: AsyncSession, game: Game) -> Resource:
-    """Create a test resource."""
-    resource = Resource(
-        game_id=game.id,  # type: ignore[arg-type]
-        name="Test Rulebook",
-        original_filename="rulebook.pdf",
-        url="/uploads/test.pdf",
-        content="",  # Required field
-        status=ResourceStatus.COMPLETED,
-        resource_type=ResourceType.RULEBOOK,
-    )
-    session.add(resource)
-    await session.flush()
-    return resource
-
-
-@pytest.fixture
-async def fragment(session: AsyncSession, game: Game, resource: Resource) -> Fragment:
-    """Create a test fragment with content for FTS."""
-    content = "The player who controls the most territory wins the game. Each turn you can move units."
-    fragment = Fragment(
-        game_id=game.id,  # type: ignore[arg-type]
-        resource_id=resource.id,  # type: ignore[arg-type]
-        content=content,
-        type=FragmentType.TEXT,
-        page_number=5,
-        section="Victory Conditions",
-        embedding=[0.0] * 1536,  # Required: dummy embedding vector
-    )
-    session.add(fragment)
-    await session.flush()
-    # Manually set search_vector since trigger doesn't exist in test DB
-    await session.execute(
-        text("UPDATE fragments SET search_vector = to_tsvector('english', :content) WHERE id = :id"),
-        {"content": content, "id": fragment.id},
-    )
-    await session.refresh(fragment)
-    return fragment
 
 
 @pytest.fixture
 async def another_fragment(session: AsyncSession, game: Game, resource: Resource) -> Fragment:
-    """Create another test fragment."""
+    """Create another test fragment with different content."""
     content = "Setup: Place the board in the center. Each player takes 10 pieces."
     fragment = Fragment(
         game_id=game.id,  # type: ignore[arg-type]
