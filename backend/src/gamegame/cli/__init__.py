@@ -9,7 +9,6 @@ from gamegame.cli.db import app as db_app
 from gamegame.cli.games import app as games_app
 from gamegame.cli.maintenance import app as maintenance_app
 from gamegame.cli.resources import app as resources_app
-from gamegame.cli.search import app as search_app
 from gamegame.cli.users import app as users_app
 from gamegame.cli.workflows import app as workflows_app
 
@@ -22,7 +21,6 @@ app.add_typer(games_app, name="games")
 app.add_typer(resources_app, name="resources")
 app.add_typer(attachments_app, name="attachments")
 app.add_typer(bgg_app, name="bgg")
-app.add_typer(search_app, name="search")
 app.add_typer(workflows_app, name="workflows")
 app.add_typer(ask_app, name="ask")
 app.add_typer(maintenance_app, name="maintenance")

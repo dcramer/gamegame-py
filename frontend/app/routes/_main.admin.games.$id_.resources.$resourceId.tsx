@@ -103,6 +103,10 @@ export default function ResourceDetailPage() {
     if (resource) {
       setName(resource.name);
       setResourceType(resource.resource_type);
+      // Default reprocess stage to failed stage when resource has failed
+      if (resource.status === "failed" && resource.processing_stage) {
+        setReprocessStage(resource.processing_stage);
+      }
     }
   }, [resource]);
 

@@ -381,7 +381,7 @@ class TestImageAnalysis:
                 (b"fake_image_data_here", ImageAnalysisContext(page_number=1)),
             ]
 
-            results = await analyze_images_batch(images, batch_size=1)
+            results = await analyze_images_batch(images)
 
             # Should return fallback result instead of raising
             assert len(results) == 1
@@ -1012,6 +1012,45 @@ class TestPipelineStageIntegration:
         # Verify resource was updated
         assert resource.content is not None
         assert resource.description == "Complete game rules."
+
+    @pytest.mark.asyncio
+    async def test_metadata_stage_updates_name_from_cleaned_filename(self, session):
+        """Metadata stage updates name even when it was derived from filename."""
+        from gamegame.tasks.pipeline import _stage_metadata
+
+        game = Game(name="Name Update Test", slug="name-update-test")
+        session.add(game)
+        await session.flush()
+
+        # Simulate what happens on upload: name is cleaned from filename
+        # but original_filename is the raw filename
+        resource = Resource(
+            game_id=game.id,
+            name="Scytherulescombined V2 Cs R13 Bw",  # Cleaned from filename
+            original_filename="scytherulescombined_v2_cs_r13_bw.pdf",  # Raw filename
+            url="/uploads/test.pdf",
+            content="",
+            status=ResourceStatus.PROCESSING,
+        )
+        session.add(resource)
+        await session.commit()
+
+        state = {"cleaned_markdown": "# Scythe Rules\n\nGame content here."}
+
+        with patch("gamegame.services.pipeline.metadata.create_chat_completion") as mock_chat:
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock(message=MagicMock(
+                content='{"name": "Scythe Rulebook", "description": "Complete rules for Scythe."}'
+            ))]
+            mock_chat.return_value = mock_response
+
+            with patch("gamegame.services.pipeline.metadata.settings") as mock_settings:
+                mock_settings.openai_api_key = "test-key"
+                await _stage_metadata(session, resource, state)
+
+        # LLM-generated name should always be applied
+        assert resource.name == "Scythe Rulebook"
+        assert resource.description == "Complete rules for Scythe."
 
 
 class TestResumableJobs:

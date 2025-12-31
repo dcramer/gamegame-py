@@ -422,3 +422,9 @@ Available fixtures in `tests/conftest.py`:
 - Prefer dependency injection over global state
 - Keep business logic in `services/`, routes thin
 - Use Pydantic for all external data validation
+
+## Testing
+
+See [TESTING.md](./TESTING.md) for manual testing workflows, including:
+- Chat endpoint testing with `mise cli ask`
+- Iteration workflow for improving AI responses

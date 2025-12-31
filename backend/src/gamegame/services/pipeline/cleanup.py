@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 from gamegame.config import settings
 from gamegame.models.model_config import get_model
@@ -12,8 +14,10 @@ from gamegame.services.openai_client import create_chat_completion
 
 logger = logging.getLogger(__name__)
 
-# Batch size for resumable processing
-CLEANUP_BATCH_SIZE = 15
+
+# Timeout for cleanup LLM calls (seconds) - longer than default since we process
+# large chunks (up to 8000 chars) with reasoning models that can take time
+CLEANUP_TIMEOUT = 180.0
 
 CLEANUP_PROMPT = """Clean and normalize this markdown extracted from a board game rulebook PDF.
 
@@ -42,7 +46,6 @@ Input markdown:
 async def cleanup_markdown(
     markdown: str,
     chunk_size: int = 8000,
-    max_concurrency: int = 3,
     on_progress: Callable[[int, int], Awaitable[None]] | None = None,
     on_checkpoint: Callable[[int, list[str]], Awaitable[None]] | None = None,
     resume_from: int = 0,
@@ -50,13 +53,11 @@ async def cleanup_markdown(
 ) -> str:
     """Clean and normalize markdown content using LLM.
 
-    Processes chunks in batches for resumability. Each batch processes
-    in parallel (up to max_concurrency) then checkpoints.
+    Processes chunks sequentially with periodic checkpointing for resumability.
 
     Args:
         markdown: Raw markdown from OCR
         chunk_size: Max size per LLM call (to stay within context limits)
-        max_concurrency: Maximum concurrent API calls (to avoid rate limits)
         on_progress: Optional callback for progress updates (current, total)
         on_checkpoint: Optional callback for checkpointing (cursor, results)
         resume_from: Chunk index to resume from (0 = start fresh)
@@ -94,63 +95,32 @@ async def cleanup_markdown(
     if current_chunk:
         chunks.append("\n\n".join(current_chunk))
 
-    logger.info(f"Cleanup: Processing {len(chunks)} chunks with max concurrency {max_concurrency}")
+    logger.info(f"Cleanup: Processing {len(chunks)} chunks sequentially")
 
     # Initialize results with previous results if resuming
-    cleaned_chunks: list[str | None] = list(previous_results) if previous_results else []
-    # Pad with None for chunks not yet processed
-    while len(cleaned_chunks) < len(chunks):
-        cleaned_chunks.append(None)
+    cleaned_chunks: list[str] = list(previous_results) if previous_results else []
 
     if resume_from > 0:
         logger.info(f"Cleanup: Resuming from chunk {resume_from}")
 
-    # Process chunks in batches for checkpointing
-    completed_count = resume_from
+    # Process chunks sequentially with per-item checkpointing
+    for idx in range(resume_from, len(chunks)):
+        chunk_chars = len(chunks[idx])
+        logger.info(f"Cleanup: Processing chunk {idx + 1}/{len(chunks)} ({chunk_chars} chars)")
 
-    for batch_start in range(resume_from, len(chunks), CLEANUP_BATCH_SIZE):
-        batch_end = min(batch_start + CLEANUP_BATCH_SIZE, len(chunks))
-        batch_indices = list(range(batch_start, batch_end))
+        # Clean this chunk
+        result = await _cleanup_chunk(chunks[idx])
+        cleaned_chunks.append(result)
 
-        logger.info(f"Cleanup: Processing batch {batch_start}-{batch_end} of {len(chunks)}")
+        # Report progress and checkpoint after each item
+        if on_progress:
+            await on_progress(idx + 1, len(chunks))
 
-        # Process this batch in parallel with limited concurrency
-        semaphore = asyncio.Semaphore(max_concurrency)
-
-        async def cleanup_with_semaphore(idx: int, chunk: str) -> tuple[int, str]:
-            async with semaphore:
-                logger.debug(f"Cleanup: Processing chunk {idx + 1}/{len(chunks)}")
-                return idx, await _cleanup_chunk(chunk)
-
-        # Create tasks for this batch only
-        tasks = [
-            cleanup_with_semaphore(idx, chunks[idx])
-            for idx in batch_indices
-        ]
-        batch_results = await asyncio.gather(*tasks)
-
-        # Store results in correct positions
-        for idx, result in batch_results:
-            cleaned_chunks[idx] = result
-            completed_count += 1
-
-            # Report progress
-            if on_progress:
-                await on_progress(completed_count, len(chunks))
-
-        # Checkpoint after each batch
         if on_checkpoint:
-            # Only include non-None results up to current position
-            results_so_far = [c for c in cleaned_chunks[:batch_end] if c is not None]
-            await on_checkpoint(batch_end, results_so_far)
-
-        logger.info(f"Cleanup: Completed batch, {completed_count}/{len(chunks)} chunks processed")
-
-    # Filter out any None values (shouldn't happen, but safety check)
-    final_results = [c for c in cleaned_chunks if c is not None]
+            await on_checkpoint(idx + 1, cleaned_chunks)
 
     logger.info(f"Cleanup: Completed {len(chunks)} chunks")
-    return "\n\n".join(final_results)
+    return "\n\n".join(cleaned_chunks)
 
 
 async def _cleanup_chunk(markdown: str) -> str:
@@ -159,7 +129,7 @@ async def _cleanup_chunk(markdown: str) -> str:
     Uses create_chat_completion which includes:
     - Retry logic (3 attempts with exponential backoff)
     - Circuit breaker for OpenAI failures
-    - Configurable timeout from settings
+    - Extended timeout for large chunk processing
     """
     response = await create_chat_completion(
         model=get_model("reasoning"),
@@ -171,6 +141,7 @@ async def _cleanup_chunk(markdown: str) -> str:
         ],
         max_completion_tokens=len(markdown) + 1000,  # Allow some expansion
         temperature=1,  # GPT-5/GPT-4o requires temperature 1
+        timeout=CLEANUP_TIMEOUT,
     )
 
     return response.choices[0].message.content or markdown

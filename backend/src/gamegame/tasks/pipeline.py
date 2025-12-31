@@ -738,10 +738,9 @@ async def _stage_metadata(
     if generated:
         state["generated_name"] = generated.name
         state["generated_description"] = generated.description
-        # Update resource with generated description (keep user's name)
-        if not resource.name or resource.name == resource.original_filename:
-            resource.name = generated.name
-        # Always update description if we generated one
+        # Always use LLM-generated name (it's better than filename-derived names)
+        # Users can override via PATCH if needed
+        resource.name = generated.name
         resource.description = generated.description
 
     # Also store content for resource

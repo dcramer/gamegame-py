@@ -27,18 +27,21 @@ OPENAI_RETRYABLE = (
 )
 
 
-def get_openai_client() -> AsyncOpenAI:
+def get_openai_client(timeout: float | None = None) -> AsyncOpenAI:
     """Get an AsyncOpenAI client with configured timeout.
 
     We disable the SDK's internal retries (max_retries=0) because we handle
     retries ourselves with tenacity, which gives us better logging and control.
+
+    Args:
+        timeout: Optional timeout override in seconds. Defaults to settings.openai_timeout.
 
     Returns:
         AsyncOpenAI client with timeout from settings.
     """
     return AsyncOpenAI(
         api_key=settings.openai_api_key,
-        timeout=settings.openai_timeout,
+        timeout=timeout if timeout is not None else settings.openai_timeout,
         max_retries=0,  # Disable SDK retries, we use tenacity instead
     )
 
@@ -48,6 +51,7 @@ async def create_chat_completion(
     model: str = "gpt-4o-mini",
     temperature: float = 1.0,  # GPT-5 requires temperature 1.0
     max_completion_tokens: int | None = None,
+    timeout: float | None = None,
     **kwargs: Any,
 ) -> ChatCompletion:
     """Create a chat completion with retry and circuit breaker.
@@ -57,6 +61,7 @@ async def create_chat_completion(
         model: Model to use
         temperature: Sampling temperature
         max_completion_tokens: Maximum tokens in response
+        timeout: Optional timeout override in seconds (defaults to settings.openai_timeout)
         **kwargs: Additional arguments for OpenAI API
 
     Returns:
@@ -68,7 +73,7 @@ async def create_chat_completion(
     """
 
     async def _call() -> ChatCompletion:
-        client = get_openai_client()
+        client = get_openai_client(timeout=timeout)
         # Build params, only including max_completion_tokens if set
         params: dict[str, Any] = {
             "model": model,
@@ -98,6 +103,7 @@ async def create_chat_completion_stream(
     model: str = "gpt-4o-mini",
     temperature: float = 1.0,  # GPT-5 requires temperature 1.0
     max_completion_tokens: int | None = None,
+    timeout: float | None = None,
     **kwargs: Any,
 ) -> AsyncIterator[ChatCompletionChunk]:
     """Create a streaming chat completion with circuit breaker.
@@ -110,6 +116,7 @@ async def create_chat_completion_stream(
         model: Model to use
         temperature: Sampling temperature
         max_completion_tokens: Maximum tokens in response
+        timeout: Optional timeout override in seconds (defaults to settings.openai_timeout)
         **kwargs: Additional arguments for OpenAI API
 
     Yields:
@@ -122,7 +129,7 @@ async def create_chat_completion_stream(
     if openai_circuit.state.value == "open":
         raise CircuitOpenError("OpenAI circuit breaker is open")
 
-    client = get_openai_client()
+    client = get_openai_client(timeout=timeout)
     # Build params, only including max_completion_tokens if set
     params: dict[str, Any] = {
         "model": model,

@@ -304,16 +304,12 @@ async def analyze_single_image(
 
 async def analyze_images_batch(
     images: list[tuple[bytes | str, ImageAnalysisContext]],
-    batch_size: int = 3,
-    delay_between_batches: float = 1.0,
     on_progress: Callable[[int, int], None] | Callable[[int, int], Awaitable[None]] | None = None,
 ) -> list[ImageAnalysisResult]:
-    """Analyze multiple images in batches to respect rate limits.
+    """Analyze multiple images sequentially.
 
     Args:
         images: List of (image_data, context) tuples
-        batch_size: Number of concurrent requests per batch
-        delay_between_batches: Seconds to wait between batches
         on_progress: Optional callback(completed, total) for progress updates
 
     Returns:
@@ -325,56 +321,36 @@ async def analyze_images_batch(
 
     results: list[ImageAnalysisResult] = []
     total = len(images)
-    batch_num = 0
-    total_batches = (total + batch_size - 1) // batch_size
 
-    logger.info(f"Starting image analysis: {total} images in {total_batches} batches")
+    logger.info(f"Starting image analysis: {total} images")
 
-    for i in range(0, len(images), batch_size):
-        batch = images[i : i + batch_size]
-        batch_num += 1
+    for idx, (img_data, ctx) in enumerate(images):
+        page_num = ctx.page_number
 
-        logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} images)")
-
-        # Process batch in parallel
-        batch_results = await asyncio.gather(
-            *[analyze_single_image(img, ctx) for img, ctx in batch],
-            return_exceptions=True,
-        )
-
-        # Handle results, converting exceptions to "bad" quality fallback
-        for j, result in enumerate(batch_results):
-            img_idx = i + j
-            page_num = batch[j][1].page_number
-
-            if isinstance(result, Exception):
-                logger.warning(f"Image {img_idx + 1}/{total} (page {page_num}) analysis failed: {result}")
-                results.append(
-                    ImageAnalysisResult(
-                        description="Analysis failed",
-                        quality=ImageQuality.BAD,
-                        relevant=False,
-                        image_type=ImageType.DECORATIVE,
-                        ocr_text=None,
-                    )
+        try:
+            result = await analyze_single_image(img_data, ctx)
+            logger.info(
+                f"Image {idx + 1}/{total} (page {page_num}): "
+                f"type={result.image_type.value}, quality={result.quality.value}"
+            )
+            results.append(result)
+        except Exception as e:
+            logger.warning(f"Image {idx + 1}/{total} (page {page_num}) analysis failed: {e}")
+            results.append(
+                ImageAnalysisResult(
+                    description="Analysis failed",
+                    quality=ImageQuality.BAD,
+                    relevant=False,
+                    image_type=ImageType.DECORATIVE,
+                    ocr_text=None,
                 )
-            else:
-                logger.info(
-                    f"Image {img_idx + 1}/{total} (page {page_num}): "
-                    f"type={result.image_type.value}, quality={result.quality.value}"
-                )
-                results.append(result)  # type: ignore[arg-type]
+            )
 
         # Progress callback (support both sync and async)
-        completed = min(i + batch_size, total)
         if on_progress:
-            result = on_progress(completed, total)
-            if asyncio.iscoroutine(result):
-                await result
-
-        # Delay between batches (except for last batch)
-        if i + batch_size < len(images):
-            await asyncio.sleep(delay_between_batches)
+            callback_result = on_progress(idx + 1, total)
+            if asyncio.iscoroutine(callback_result):
+                await callback_result
 
     logger.info(f"Completed image analysis: {total} images processed")
     return results

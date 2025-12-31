@@ -1,6 +1,5 @@
 """EMBED stage - Chunk content and generate embeddings with enrichment."""
 
-import asyncio
 import json
 import logging
 import re
@@ -366,44 +365,29 @@ Format: {{ "answerTypes": ["type1", "type2", ...] }}"""
 async def classify_fragments_batch(
     chunks: list[Chunk],
     resource_info: ResourceInfo,
-    batch_size: int = 5,
 ) -> list[list[str]]:
-    """Batch classify answer types for multiple fragments.
+    """Classify answer types for multiple fragments sequentially.
 
     Args:
         chunks: Chunks to classify
         resource_info: Resource metadata
-        batch_size: Parallel batch size
 
     Returns:
         List of answer type lists (one per chunk)
     """
     results: list[list[str]] = []
     total = len(chunks)
-    total_batches = (total + batch_size - 1) // batch_size
 
-    logger.info(f"Classifying answer types: {total} chunks in {total_batches} batches")
+    logger.info(f"Classifying answer types: {total} chunks")
 
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i + batch_size]
-        batch_num = i // batch_size + 1
-
-        logger.info(f"Classification batch {batch_num}/{total_batches} ({len(batch)} chunks)")
-
-        batch_results = await asyncio.gather(*[
-            classify_fragment_answer_types(
-                chunk.content,
-                chunk.section,
-                resource_info,
-            )
-            for chunk in batch
-        ])
-
-        results.extend(batch_results)
-
-        # Small delay between batches
-        if i + batch_size < len(chunks):
-            await asyncio.sleep(0.1)
+    for idx, chunk in enumerate(chunks):
+        logger.debug(f"Classifying chunk {idx + 1}/{total}")
+        result = await classify_fragment_answer_types(
+            chunk.content,
+            chunk.section,
+            resource_info,
+        )
+        results.append(result)
 
     logger.info(f"Completed answer type classification: {total} chunks")
     return results
@@ -502,15 +486,13 @@ Generate exactly {num_questions} questions, one per line. Questions only, no num
 async def generate_hyde_questions_batch(
     chunks: list[Chunk],
     resource_info: ResourceInfo,
-    batch_size: int = 5,
     num_questions: int = 5,
 ) -> list[list[str]]:
-    """Batch generate HyDE questions for multiple chunks.
+    """Generate HyDE questions for multiple chunks sequentially.
 
     Args:
         chunks: Chunks to generate questions for
         resource_info: Resource metadata
-        batch_size: Parallel batch size
         num_questions: Questions per chunk
 
     Returns:
@@ -518,38 +500,21 @@ async def generate_hyde_questions_batch(
     """
     results: list[list[str]] = []
     total = len(chunks)
-    total_batches = (total + batch_size - 1) // batch_size
 
-    logger.info(f"Generating HyDE questions: {total} chunks in {total_batches} batches")
+    logger.info(f"Generating HyDE questions: {total} chunks")
 
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i + batch_size]
-        batch_num = i // batch_size + 1
-
-        logger.info(f"HyDE batch {batch_num}/{total_batches} ({len(batch)} chunks)")
-
-        batch_results = await asyncio.gather(*[
-            generate_hyde_questions(
-                chunk.content,
-                chunk.section,
-                resource_info,
-                num_questions,
-            )
-            for chunk in batch
-        ])
-
-        results.extend(batch_results)
-
-        # Small delay between batches
-        if i + batch_size < len(chunks):
-            await asyncio.sleep(0.1)
+    for idx, chunk in enumerate(chunks):
+        logger.debug(f"Generating HyDE questions for chunk {idx + 1}/{total}")
+        result = await generate_hyde_questions(
+            chunk.content,
+            chunk.section,
+            resource_info,
+            num_questions,
+        )
+        results.append(result)
 
     logger.info(f"Completed HyDE question generation: {total} chunks")
     return results
-
-
-# Batch size for resumable processing
-EMBED_BATCH_SIZE = 15
 
 
 async def embed_content(
@@ -567,8 +532,7 @@ async def embed_content(
 ) -> int:
     """Chunk content, generate embeddings, and store fragments.
 
-    Processes chunks in batches for resumability. Each batch generates
-    questions/embeddings and creates fragments before checkpointing.
+    Processes chunks sequentially with per-item checkpointing for resumability.
 
     Args:
         session: Database session
@@ -580,7 +544,7 @@ async def embed_content(
         generate_hyde: Whether to generate HyDE questions
         classify_answer_types: Whether to classify answer types
         on_progress: Callback for progress updates (current, total)
-        on_checkpoint: Callback for checkpointing after each batch (cursor)
+        on_checkpoint: Callback for checkpointing after each item (cursor)
         resume_from: Chunk index to resume from (0 = start fresh)
 
     Returns:
@@ -612,7 +576,7 @@ async def embed_content(
         logger.info(f"Resource {resource_id}: No chunks to embed")
         return 0
 
-    logger.info(f"Resource {resource_id}: Created {len(chunks)} chunks from content")
+    logger.info(f"Resource {resource_id}: Processing {len(chunks)} chunks sequentially")
 
     if resume_from > 0:
         logger.info(f"Resource {resource_id}: Resuming from chunk {resume_from}")
@@ -620,145 +584,109 @@ async def embed_content(
     # Track total fragments created (including already-created from resume)
     fragments_created = resume_from
 
-    # Process chunks in batches
-    for batch_start in range(resume_from, len(chunks), EMBED_BATCH_SIZE):
-        batch_end = min(batch_start + EMBED_BATCH_SIZE, len(chunks))
-        batch_chunks = chunks[batch_start:batch_end]
+    # Process chunks sequentially with per-item checkpointing
+    for idx in range(resume_from, len(chunks)):
+        chunk = chunks[idx]
+        chunk_chars = len(chunk.content)
+        logger.info(f"Resource {resource_id}: Embedding chunk {idx + 1}/{len(chunks)} ({chunk_chars} chars)")
 
-        logger.info(
-            f"Resource {resource_id}: Processing batch {batch_start}-{batch_end} "
-            f"of {len(chunks)} chunks"
-        )
-
-        # Generate HyDE questions for this batch
+        # Generate HyDE questions for this chunk
         if generate_hyde:
-            batch_hyde_questions = await generate_hyde_questions_batch(
-                batch_chunks, resource_info, batch_size=5, num_questions=5
+            hyde_questions = await generate_hyde_questions(
+                chunk.content,
+                chunk.section,
+                resource_info,
+                num_questions=5,
             )
         else:
-            batch_hyde_questions = [[] for _ in batch_chunks]
+            hyde_questions = []
 
-        # Classify answer types for this batch
+        # Classify answer types for this chunk
         if classify_answer_types:
-            batch_answer_types = await classify_fragments_batch(
-                batch_chunks, resource_info, batch_size=5
+            answer_types = await classify_fragment_answer_types(
+                chunk.content,
+                chunk.section,
+                resource_info,
             )
         else:
-            batch_answer_types = [[] for _ in batch_chunks]
+            answer_types = []
 
-        # Build searchable content for this batch
-        batch_searchable = [
-            build_searchable_content(chunk, resource_info)
-            for chunk in batch_chunks
-        ]
+        # Build searchable content
+        searchable = build_searchable_content(chunk, resource_info)
 
-        # Prepare texts to embed for this batch
-        texts_to_embed: list[str] = []
-        embedding_map: list[dict] = []
+        # Prepare texts to embed (content + questions)
+        texts_to_embed = [searchable, *hyde_questions]
 
-        for i, (chunk, questions, searchable) in enumerate(
-            zip(batch_chunks, batch_hyde_questions, batch_searchable, strict=True)
+        # Generate embeddings
+        embeddings = await generate_embeddings(texts_to_embed)
+        content_embedding = embeddings[0]
+        question_embeddings = embeddings[1:] if len(embeddings) > 1 else []
+
+        # Create fragment
+        fragment = Fragment(
+            game_id=game_id,
+            resource_id=resource_id,
+            content=chunk.content,
+            searchable_content=searchable,
+            type=chunk.chunk_type,
+            page_number=chunk.page_number,
+            page_range=chunk.page_range,
+            section=chunk.section,
+            embedding=content_embedding,
+            synthetic_questions=hyde_questions if hyde_questions else None,
+            answer_types=answer_types if answer_types else None,
+            images=chunk.images if chunk.images else None,
+            resource_name=resource_info.name,
+            resource_description=resource_info.description,
+            resource_type=resource_info.resource_type,
+            version=1,
+        )
+        session.add(fragment)
+        await session.flush()
+
+        # Create content embedding record
+        content_emb_record = Embedding(
+            id=str(fragment.id),
+            fragment_id=fragment.id,
+            game_id=game_id,
+            resource_id=resource_id,
+            embedding=content_embedding,
+            type=EmbeddingType.CONTENT,
+            page_number=chunk.page_number,
+            section=chunk.section,
+            fragment_type=chunk.chunk_type.value,
+            version=1,
+        )
+        session.add(content_emb_record)
+
+        # Create question embedding records
+        for q_idx, (question, q_embedding) in enumerate(
+            zip(hyde_questions, question_embeddings, strict=True)
         ):
-            # Add searchable content embedding
-            texts_to_embed.append(searchable)
-            embedding_map.append({"batch_idx": i, "type": "content"})
-
-            # Add question embeddings
-            for q_idx, question in enumerate(questions):
-                texts_to_embed.append(question)
-                embedding_map.append({
-                    "batch_idx": i, "type": "question", "q_idx": q_idx, "text": question
-                })
-
-        # Generate embeddings for this batch
-        batch_embeddings = await generate_embeddings(texts_to_embed)
-
-        # Create fragments for this batch
-        for batch_idx, chunk in enumerate(batch_chunks):
-            # Find content embedding
-            content_embedding = None
-            for emb_idx, mapping in enumerate(embedding_map):
-                if mapping["batch_idx"] == batch_idx and mapping["type"] == "content":
-                    content_embedding = batch_embeddings[emb_idx]
-                    break
-
-            if content_embedding is None:
-                continue
-
-            # Create fragment
-            fragment = Fragment(
-                game_id=game_id,
-                resource_id=resource_id,
-                content=chunk.content,
-                searchable_content=batch_searchable[batch_idx],
-                type=chunk.chunk_type,
-                page_number=chunk.page_number,
-                page_range=chunk.page_range,
-                section=chunk.section,
-                embedding=content_embedding,
-                synthetic_questions=batch_hyde_questions[batch_idx] if batch_hyde_questions[batch_idx] else None,
-                answer_types=batch_answer_types[batch_idx] if batch_answer_types[batch_idx] else None,
-                images=chunk.images if chunk.images else None,
-                resource_name=resource_info.name,
-                resource_description=resource_info.description,
-                resource_type=resource_info.resource_type,
-                version=1,
-            )
-            session.add(fragment)
-            await session.flush()
-
-            # Create content embedding record
-            content_emb_record = Embedding(
-                id=str(fragment.id),
+            hyde_emb_record = Embedding(
+                id=f"{fragment.id}-q{q_idx}",
                 fragment_id=fragment.id,
                 game_id=game_id,
                 resource_id=resource_id,
-                embedding=content_embedding,
-                type=EmbeddingType.CONTENT,
+                embedding=q_embedding,
+                type=EmbeddingType.QUESTION,
+                question_index=q_idx,
+                question_text=question,
                 page_number=chunk.page_number,
                 section=chunk.section,
                 fragment_type=chunk.chunk_type.value,
                 version=1,
             )
-            session.add(content_emb_record)
+            session.add(hyde_emb_record)
 
-            # Create question embedding records
-            for emb_idx, mapping in enumerate(embedding_map):
-                if mapping["batch_idx"] == batch_idx and mapping["type"] == "question":
-                    q_idx = mapping["q_idx"]
-                    q_text = mapping["text"]
-                    q_embedding = batch_embeddings[emb_idx]
+        fragments_created += 1
 
-                    hyde_emb_record = Embedding(
-                        id=f"{fragment.id}-q{q_idx}",
-                        fragment_id=fragment.id,
-                        game_id=game_id,
-                        resource_id=resource_id,
-                        embedding=q_embedding,
-                        type=EmbeddingType.QUESTION,
-                        question_index=q_idx,
-                        question_text=q_text,
-                        page_number=chunk.page_number,
-                        section=chunk.section,
-                        fragment_type=chunk.chunk_type.value,
-                        version=1,
-                    )
-                    session.add(hyde_emb_record)
+        # Report progress and checkpoint after each item
+        if on_progress:
+            await on_progress(fragments_created, len(chunks))
 
-            fragments_created += 1
-
-            # Report progress
-            if on_progress:
-                await on_progress(fragments_created, len(chunks))
-
-        # Checkpoint after each batch
         if on_checkpoint:
-            await on_checkpoint(batch_end)
-
-        logger.info(
-            f"Resource {resource_id}: Completed batch, "
-            f"{fragments_created}/{len(chunks)} fragments created"
-        )
+            await on_checkpoint(idx + 1)
 
     logger.info(f"Resource {resource_id}: Completed embedding, {fragments_created} fragments created")
     return fragments_created
