@@ -3,11 +3,13 @@
 import logging
 from typing import Any
 
+import httpx
+from openai import APIConnectionError, APITimeoutError, RateLimitError
 from sqlalchemy import delete
 from sqlmodel import select
 
 from gamegame.database import async_session_factory
-from gamegame.models import Attachment, Embedding, Fragment, Resource
+from gamegame.models import Attachment, Embedding, Fragment, Resource, Segment
 from gamegame.models.attachment import AttachmentType, DetectedType, QualityRating
 from gamegame.models.resource import ProcessingStage, ResourceStatus
 from gamegame.services.pipeline.cleanup import cleanup_markdown
@@ -20,6 +22,7 @@ from gamegame.services.pipeline.vision import (
     analyze_images_batch,
     extract_image_context,
 )
+from gamegame.services.resilience import CircuitOpenError
 from gamegame.services.storage import storage
 from gamegame.services.workflow_tracking import (
     complete_workflow_run,
@@ -30,6 +33,66 @@ from gamegame.services.workflow_tracking import (
     update_workflow_progress,
 )
 
+
+def _classify_error(e: Exception) -> tuple[str, str, str]:
+    """Classify an exception into error code, user message, and suggestion.
+
+    Returns:
+        Tuple of (error_code, user_message, suggestion)
+    """
+    # OpenAI-specific errors
+    if isinstance(e, APITimeoutError) or isinstance(e, httpx.ReadTimeout):
+        return (
+            "AI_TIMEOUT",
+            "AI service timed out while processing",
+            "The document may be complex. Try again - retries will resume from where it stopped.",
+        )
+    if isinstance(e, RateLimitError):
+        return (
+            "RATE_LIMIT",
+            "AI service rate limit reached",
+            "Wait a few minutes before retrying.",
+        )
+    if isinstance(e, APIConnectionError):
+        return (
+            "AI_CONNECTION",
+            "Could not connect to AI service",
+            "Check your internet connection and try again.",
+        )
+    if isinstance(e, CircuitOpenError):
+        return (
+            "AI_UNAVAILABLE",
+            "AI service temporarily unavailable",
+            "The service is experiencing issues. Wait a few minutes before retrying.",
+        )
+
+    # HTTP errors
+    if isinstance(e, httpx.HTTPStatusError):
+        status = e.response.status_code
+        if status == 401:
+            return ("AUTH_ERROR", "Authentication failed", "Check API credentials.")
+        if status == 403:
+            return ("PERMISSION_ERROR", "Permission denied", "Check API permissions.")
+        if status == 429:
+            return ("RATE_LIMIT", "Rate limit exceeded", "Wait before retrying.")
+        if status >= 500:
+            return (
+                "SERVICE_ERROR",
+                f"External service error (HTTP {status})",
+                "Try again later.",
+            )
+        return ("HTTP_ERROR", f"HTTP error {status}", "Check the request and try again.")
+
+    if isinstance(e, httpx.ConnectError):
+        return (
+            "CONNECTION_ERROR",
+            "Could not connect to external service",
+            "Check your internet connection.",
+        )
+
+    # Generic fallback
+    return ("PIPELINE_ERROR", str(e), "Try again or contact support.")
+
 logger = logging.getLogger(__name__)
 
 # Stage order for pipeline
@@ -38,6 +101,7 @@ STAGE_ORDER = [
     ProcessingStage.VISION,
     ProcessingStage.CLEANUP,
     ProcessingStage.METADATA,
+    ProcessingStage.SEGMENT,
     ProcessingStage.EMBED,
     ProcessingStage.FINALIZE,
 ]
@@ -113,26 +177,41 @@ async def process_resource(
                 await session.commit()
                 return {"status": "skipped", "message": "Already completed"}
 
+            # Capture original status before updating (for auto-resume detection)
+            original_status = resource.status
+
             # Update status to processing and link to workflow run
             resource.status = ResourceStatus.PROCESSING
             resource.current_run_id = run_id
             await session.commit()
 
-            # Determine starting stage
+            # Determine starting stage and load state
+            state: dict[str, Any] = {}
+
             if start_stage:
+                # Explicit start stage provided (manual reprocess or stall recovery)
                 try:
                     current_stage_idx = STAGE_ORDER.index(ProcessingStage(start_stage))
                 except ValueError:
                     current_stage_idx = 0
+                # Load existing state if available
+                if resource.processing_metadata:
+                    state = resource.processing_metadata
+            elif (
+                resource.processing_stage is not None
+                and original_status == ResourceStatus.PROCESSING
+            ):
+                # Auto-resume: resource was mid-processing when server crashed/restarted
+                # SAQ re-delivered the job, so we resume from the last checkpoint
+                current_stage_idx = STAGE_ORDER.index(resource.processing_stage)
+                state = resource.processing_metadata or {}
+                logger.info(
+                    f"Resource {resource_id}: Auto-resuming from stage "
+                    f"{resource.processing_stage.value}"
+                )
             else:
+                # Fresh start
                 current_stage_idx = 0
-
-            # Pipeline state (passed between stages)
-            state: dict[str, Any] = {}
-
-            # Load existing state if resuming
-            if resource.processing_metadata:
-                state = resource.processing_metadata
 
             # Run stages
             for stage in STAGE_ORDER[current_stage_idx:]:
@@ -178,23 +257,27 @@ async def process_resource(
         except Exception as e:
             logger.exception(f"Resource {resource_id}: Pipeline failed")
 
+            # Classify the error for better user feedback
+            error_code, user_message, suggestion = _classify_error(e)
+
             # Capture context about where we failed (stack traces go to Sentry)
             current_stage = resource.processing_stage.value if resource and resource.processing_stage else None
             extra_context = {
                 "last_stage": current_stage,
                 "state_keys": list(state.keys()) if state else [],
+                "suggestion": suggestion,
             }
 
-            await mark_resource_failed(session, resource_id, str(e))
+            await mark_resource_failed(session, resource_id, user_message)
             await fail_workflow_run(
                 session,
                 run_id,
-                str(e),
-                "PIPELINE_ERROR",
+                user_message,
+                error_code,
                 extra_context=extra_context,
             )
             await session.commit()
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "message": user_message}
 
 
 async def _run_stage(
@@ -222,6 +305,8 @@ async def _run_stage(
         return await _stage_cleanup(session, resource, state)
     elif stage == ProcessingStage.METADATA:
         return await _stage_metadata(session, resource, state)
+    elif stage == ProcessingStage.SEGMENT:
+        return await _stage_segment(session, resource, state)
     elif stage == ProcessingStage.EMBED:
         return await _stage_embed(session, resource, state)
     elif stage == ProcessingStage.FINALIZE:
@@ -232,7 +317,7 @@ async def _run_stage(
 
 
 async def _stage_ingest(
-    _session: Any,
+    session: Any,
     resource: Resource,
     state: dict[str, Any],
 ) -> dict[str, Any]:
@@ -257,6 +342,17 @@ async def _stage_ingest(
     # Store raw markdown in state
     state["raw_markdown"] = extraction.raw_markdown
     state["page_count"] = extraction.total_pages
+
+    # Track page boundaries for segment extraction
+    # Each entry is (start_char, end_char) position in combined markdown
+    page_boundaries: list[tuple[int, int]] = []
+    current_pos = 0
+    for page in extraction.pages:
+        page_len = len(page.markdown)
+        page_boundaries.append((current_pos, current_pos + page_len))
+        current_pos += page_len + 2  # +2 for \n\n between pages
+    state["page_boundaries"] = page_boundaries
+    logger.info(f"Resource {resource.id}: Tracked {len(page_boundaries)} page boundaries")
 
     # Collect images for vision stage
     images: list[dict[str, Any]] = [
@@ -664,6 +760,7 @@ async def _stage_cleanup(
     Supports resumability via cursor in processing_metadata.
     """
     raw_markdown = state.get("raw_markdown", "")
+    page_boundaries = state.get("page_boundaries")
 
     if not raw_markdown:
         state["cleaned_markdown"] = ""
@@ -674,7 +771,10 @@ async def _stage_cleanup(
     if cursor_data.get("stage") == "cleanup":
         resume_from = cursor_data.get("cursor", 0)
         previous_results = cursor_data.get("partial_results", [])
-        logger.info(f"Resource {resource.id}: Resuming cleanup from chunk {resume_from}")
+        if page_boundaries:
+            logger.info(f"Resource {resource.id}: Resuming cleanup after page {resume_from}")
+        else:
+            logger.info(f"Resource {resource.id}: Resuming cleanup from chunk {resume_from}")
     else:
         resume_from = 0
         previous_results = None
@@ -696,6 +796,7 @@ async def _stage_cleanup(
 
     cleaned = await cleanup_markdown(
         raw_markdown,
+        page_boundaries=page_boundaries,
         on_progress=report_cleanup_progress,
         on_checkpoint=checkpoint_cleanup,
         resume_from=resume_from,
@@ -710,15 +811,25 @@ async def _stage_cleanup(
 
 
 async def _stage_metadata(
-    _session: Any,
+    session: Any,
     resource: Resource,
     state: dict[str, Any],
 ) -> dict[str, Any]:
-    """METADATA stage - Extract metadata and generate LLM descriptions."""
+    """METADATA stage - Extract metadata and generate name/description.
+
+    This stage:
+    1. Extracts basic metadata (word count, page count, etc.)
+    2. Generates LLM-based name/description for the resource
+    3. Stores content and stats on the resource
+    """
     from gamegame.services.pipeline.metadata import generate_resource_metadata
 
     markdown = state.get("cleaned_markdown", state.get("raw_markdown", ""))
 
+    if not markdown:
+        return state
+
+    # Extract basic metadata
     metadata = extract_metadata(
         markdown=markdown,
         page_count=state.get("page_count", 0),
@@ -738,16 +849,85 @@ async def _stage_metadata(
     if generated:
         state["generated_name"] = generated.name
         state["generated_description"] = generated.description
-        # Always use LLM-generated name (it's better than filename-derived names)
-        # Users can override via PATCH if needed
         resource.name = generated.name
         resource.description = generated.description
 
-    # Also store content for resource
+    # Store content stats on resource
     resource.content = markdown
     resource.page_count = metadata.page_count
     resource.word_count = metadata.word_count
     resource.image_count = metadata.image_count
+
+    return state
+
+
+async def _stage_segment(
+    session: Any,
+    resource: Resource,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """SEGMENT stage - Extract semantic segments from the document.
+
+    This stage:
+    1. Extracts semantic segments from the document using LLM
+    2. Stores segments in the database
+    """
+    from gamegame.services.pipeline.segments import extract_segments_llm
+
+    markdown = state.get("cleaned_markdown", state.get("raw_markdown", ""))
+
+    if not markdown:
+        state["segments_created"] = 0
+        return state
+
+    # Clean up existing segments (in case of reprocessing)
+    await session.execute(
+        delete(Segment).where(Segment.resource_id == resource.id)  # type: ignore[arg-type]
+    )
+
+    # Create progress callback
+    async def report_segment_progress(current: int, total: int) -> None:
+        if resource.current_run_id:
+            await update_workflow_item_progress(
+                session, resource.current_run_id, current, total
+            )
+
+    # Extract segments using LLM
+    page_boundaries = state.get("page_boundaries")
+    segments = await extract_segments_llm(
+        markdown,
+        page_boundaries=page_boundaries,
+        resource_name=resource.name,
+        on_progress=report_segment_progress,
+    )
+    logger.info(f"Resource {resource.id}: LLM extracted {len(segments)} segments")
+
+    # Store segments in DB
+    segment_id_mapping: dict[int, str] = {}  # order_index -> segment.id
+    for segment_data in segments:
+        segment = Segment(
+            resource_id=resource.id,
+            game_id=resource.game_id,
+            title=segment_data.title,
+            hierarchy_path=segment_data.hierarchy_path,
+            level=segment_data.level,
+            order_index=segment_data.order_index,
+            content=segment_data.content,
+            page_start=segment_data.page_start,
+            page_end=segment_data.page_end,
+            word_count=segment_data.word_count,
+            char_count=segment_data.char_count,
+            parent_id=segment_data.parent_id,
+        )
+        session.add(segment)
+        await session.flush()
+        segment_data.id = segment.id
+        segment_id_mapping[segment_data.order_index] = segment.id
+
+    logger.info(f"Resource {resource.id}: Stored {len(segments)} segments in DB")
+
+    state["segments_created"] = len(segments)
+    state["segment_id_mapping"] = segment_id_mapping
 
     return state
 
@@ -777,15 +957,16 @@ async def _stage_embed(
     resource: Resource,
     state: dict[str, Any],
 ) -> dict[str, Any]:
-    """EMBED stage - Chunk and embed content.
+    """EMBED stage - Chunk segments and generate embeddings.
+
+    This stage reads segments from the database (created in SEGMENT stage)
+    and chunks them into fragments with embeddings.
 
     Supports resumability via cursor in processing_metadata.
     """
-    markdown = state.get("cleaned_markdown", state.get("raw_markdown", ""))
+    from gamegame.services.pipeline.segments import SegmentData
 
-    if not markdown:
-        state["fragments_created"] = 0
-        return state
+    markdown = state.get("cleaned_markdown", state.get("raw_markdown", ""))
 
     # Check for cursor to resume from
     cursor_data = state.get("stage_cursor", {})
@@ -795,7 +976,42 @@ async def _stage_embed(
     else:
         resume_from = 0
         # Only clean up fragments if starting fresh (not resuming)
+        # Segments are preserved - they were created in SEGMENT stage
         await _cleanup_fragments(session, resource.id)
+
+    # Read segments from database (created in SEGMENT stage)
+    segments_stmt = (
+        select(Segment)
+        .where(Segment.resource_id == resource.id)  # type: ignore[arg-type]
+        .order_by(Segment.order_index)  # type: ignore[arg-type]
+    )
+    segments_result = await session.execute(segments_stmt)
+    db_segments = segments_result.scalars().all()
+
+    if not db_segments:
+        logger.warning(f"Resource {resource.id}: No segments found in database")
+        state["fragments_created"] = 0
+        return state
+
+    # Convert DB segments to SegmentData for embed_content
+    segments = [
+        SegmentData(
+            id=seg.id,
+            level=seg.level,
+            title=seg.title,
+            hierarchy_path=seg.hierarchy_path,
+            content=seg.content,
+            order_index=seg.order_index,
+            page_start=seg.page_start,
+            page_end=seg.page_end,
+            word_count=seg.word_count,
+            char_count=seg.char_count,
+            parent_id=seg.parent_id,
+        )
+        for seg in db_segments
+    ]
+
+    logger.info(f"Resource {resource.id}: Read {len(segments)} segments from DB")
 
     # Create progress callback using resource's current run_id
     async def report_embed_progress(current: int, total: int) -> None:
@@ -816,6 +1032,7 @@ async def _stage_embed(
         resource_id=resource.id,
         game_id=resource.game_id,
         markdown=markdown,
+        segments=segments,
         generate_hyde=True,
         on_progress=report_embed_progress,
         on_checkpoint=checkpoint_embed,

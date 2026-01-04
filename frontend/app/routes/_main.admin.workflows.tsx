@@ -315,6 +315,11 @@ export default function WorkflowsPage() {
                         <StatusIcon status={workflow.status} />
                         <Badge variant={statusVariant(workflow.status)}>{workflow.status}</Badge>
                       </div>
+                      {workflow.stage_label && workflow.status === "running" && (
+                        <div className="text-xs text-muted-foreground mt-1">
+                          {workflow.stage_label}
+                        </div>
+                      )}
                     </TableCell>
                     <TableCell className="text-sm">
                       <div>{time.label}</div>
@@ -388,20 +393,25 @@ export default function WorkflowsPage() {
 
                                 {selectedWorkflow.error &&
                                   (() => {
-                                    const suggestion = getErrorSuggestion(selectedWorkflow.error);
+                                    // Get suggestion from pattern-based helper or from backend extra_data
+                                    const patternSuggestion = getErrorSuggestion(selectedWorkflow.error);
+                                    const backendSuggestion =
+                                      (selectedWorkflow.extra_data?.suggestion as string) || null;
+                                    // Prefer backend suggestion as it's more specific
+                                    const suggestionText = backendSuggestion || patternSuggestion?.suggestion;
                                     return (
                                       <div className="rounded-md bg-destructive/10 p-4 space-y-2">
                                         <div className="font-medium text-destructive">
-                                          {suggestion?.title ?? "Error"}
+                                          {patternSuggestion?.title ?? "Error"}
                                           {selectedWorkflow.error_code &&
                                             ` (${selectedWorkflow.error_code})`}
                                         </div>
                                         <pre className="text-sm text-destructive whitespace-pre-wrap">
                                           {selectedWorkflow.error}
                                         </pre>
-                                        {suggestion && (
+                                        {suggestionText && (
                                           <div className="text-sm text-muted-foreground border-t border-destructive/20 pt-2 mt-2">
-                                            <strong>Suggestion:</strong> {suggestion.suggestion}
+                                            <strong>Suggestion:</strong> {suggestionText}
                                           </div>
                                         )}
                                       </div>

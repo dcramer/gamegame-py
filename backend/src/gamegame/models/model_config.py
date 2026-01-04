@@ -37,6 +37,11 @@ class ModelConfig:
     # Model for embeddings
     embedding: str = "text-embedding-3-small"
 
+    # Max chars per chunk for cleanup stage
+    # Smaller chunks = faster responses = less likely to timeout
+    # 20k chars processes ~2-3 pages per API call
+    cleanup_chunk_size: int = 20_000
+
 
 # Development/Test models - optimized for cost and speed
 DEV_MODELS = ModelConfig(

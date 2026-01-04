@@ -3,21 +3,31 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 from gamegame.config import settings
-from gamegame.models.model_config import get_model
+from gamegame.models.model_config import get_model, get_model_config
 from gamegame.services.openai_client import create_chat_completion
 
 logger = logging.getLogger(__name__)
 
 
-# Timeout for cleanup LLM calls (seconds) - longer than default since we process
-# large chunks (up to 8000 chars) with reasoning models that can take time
-CLEANUP_TIMEOUT = 180.0
+@dataclass
+class CleanupChunk:
+    """A chunk of content to be cleaned."""
+
+    content: str
+    start_page: int  # 1-indexed, or chunk index if no page info
+    end_page: int  # 1-indexed, or chunk index if no page info
+
+
+# Timeout for cleanup LLM calls (seconds) - 10 minutes to handle large chunks
+# with reasoning models that can take time (default chunk size is 20k chars)
+CLEANUP_TIMEOUT = 600.0
 
 CLEANUP_PROMPT = """Clean and normalize this markdown extracted from a board game rulebook PDF.
 
@@ -43,9 +53,118 @@ Input markdown:
 """
 
 
+def _chunk_by_pages(
+    markdown: str,
+    page_boundaries: list[tuple[int, int]],
+    max_size: int,
+) -> list[CleanupChunk]:
+    """Group consecutive pages into chunks without exceeding max_size.
+
+    Args:
+        markdown: Full document markdown
+        page_boundaries: List of (start_char, end_char) for each page
+        max_size: Maximum characters per chunk
+
+    Returns:
+        List of CleanupChunk with page ranges
+    """
+    chunks: list[CleanupChunk] = []
+    current_pages: list[tuple[str, int]] = []  # (content, page_num)
+    current_size = 0
+
+    for page_num, (start, end) in enumerate(page_boundaries, 1):
+        page_content = markdown[start:end]
+        page_size = len(page_content)
+
+        # If single page exceeds max, it gets its own chunk
+        if page_size > max_size:
+            # Finalize current chunk first
+            if current_pages:
+                combined = "\n\n".join(content for content, _ in current_pages)
+                start_pg = current_pages[0][1]
+                end_pg = current_pages[-1][1]
+                chunks.append(CleanupChunk(combined, start_pg, end_pg))
+                current_pages = []
+                current_size = 0
+            # Add oversized page as its own chunk
+            chunks.append(CleanupChunk(page_content, page_num, page_num))
+            continue
+
+        # If adding this page would exceed max, finalize current chunk
+        if current_size + page_size > max_size and current_pages:
+            combined = "\n\n".join(content for content, _ in current_pages)
+            start_pg = current_pages[0][1]
+            end_pg = current_pages[-1][1]
+            chunks.append(CleanupChunk(combined, start_pg, end_pg))
+            current_pages = []
+            current_size = 0
+
+        current_pages.append((page_content, page_num))
+        current_size += page_size + 2  # +2 for \n\n separator
+
+    # Finalize remaining pages
+    if current_pages:
+        combined = "\n\n".join(content for content, _ in current_pages)
+        start_pg = current_pages[0][1]
+        end_pg = current_pages[-1][1]
+        chunks.append(CleanupChunk(combined, start_pg, end_pg))
+
+    return chunks
+
+
+def _chunk_by_paragraphs(
+    markdown: str,
+    max_size: int,
+) -> list[CleanupChunk]:
+    """Split markdown into chunks at paragraph boundaries.
+
+    Fallback when page boundaries are not available.
+
+    Args:
+        markdown: Full document markdown
+        max_size: Maximum characters per chunk
+
+    Returns:
+        List of CleanupChunk (using chunk index as page numbers)
+    """
+    paragraphs = markdown.split("\n\n")
+    chunks: list[CleanupChunk] = []
+    current_paragraphs: list[str] = []
+    current_size = 0
+
+    for para in paragraphs:
+        para_size = len(para)
+
+        # If adding this paragraph would exceed max, finalize current chunk
+        if current_size + para_size > max_size and current_paragraphs:
+            chunk_idx = len(chunks) + 1
+            chunks.append(CleanupChunk(
+                "\n\n".join(current_paragraphs),
+                chunk_idx,
+                chunk_idx,
+            ))
+            current_paragraphs = []
+            current_size = 0
+
+        current_paragraphs.append(para)
+        current_size += para_size + 2  # +2 for \n\n separator
+
+    # Finalize remaining paragraphs
+    if current_paragraphs:
+        chunk_idx = len(chunks) + 1
+        chunks.append(CleanupChunk(
+            "\n\n".join(current_paragraphs),
+            chunk_idx,
+            chunk_idx,
+        ))
+
+    return chunks
+
+
 async def cleanup_markdown(
     markdown: str,
-    chunk_size: int = 8000,
+    page_boundaries: list[tuple[int, int]] | None = None,
+    chunk_size: int | None = None,
     on_progress: Callable[[int, int], Awaitable[None]] | None = None,
     on_checkpoint: Callable[[int, list[str]], Awaitable[None]] | None = None,
     resume_from: int = 0,
@@ -54,18 +173,27 @@ async def cleanup_markdown(
     """Clean and normalize markdown content using LLM.
 
     Processes chunks sequentially with periodic checkpointing for resumability.
+    When page_boundaries is provided, chunks are aligned to page boundaries
+    for better context coherence.
 
     Args:
         markdown: Raw markdown from OCR
-        chunk_size: Max size per LLM call (to stay within context limits)
+        page_boundaries: Optional list of (start_char, end_char) for each page.
+            When provided, chunking respects page boundaries.
+        chunk_size: Max size per LLM call. If None, uses model config default.
         on_progress: Optional callback for progress updates (current, total)
-        on_checkpoint: Optional callback for checkpointing (cursor, results)
-        resume_from: Chunk index to resume from (0 = start fresh)
+        on_checkpoint: Optional callback for checkpointing (cursor, results).
+            Cursor is the last completed end_page (or chunk index if no pages).
+        resume_from: Last completed end_page/chunk to resume from (0 = start fresh)
         previous_results: Already-cleaned chunks from previous run
 
     Returns:
         Cleaned markdown
     """
+    # Use configured chunk size if not explicitly provided
+    if chunk_size is None:
+        chunk_size = get_model_config().cleanup_chunk_size
+
     if not markdown.strip():
         return ""
 
@@ -77,39 +205,59 @@ async def cleanup_markdown(
     if len(markdown) <= chunk_size:
         return await _cleanup_chunk(markdown)
 
-    # Split into chunks
-    # Split on double newlines to preserve paragraph boundaries
-    paragraphs = markdown.split("\n\n")
-    chunks: list[str] = []
-    current_chunk: list[str] = []
-    current_size = 0
-
-    for para in paragraphs:
-        if current_size + len(para) > chunk_size and current_chunk:
-            chunks.append("\n\n".join(current_chunk))
-            current_chunk = []
-            current_size = 0
-        current_chunk.append(para)
-        current_size += len(para) + 2
-
-    if current_chunk:
-        chunks.append("\n\n".join(current_chunk))
-
-    logger.info(f"Cleanup: Processing {len(chunks)} chunks sequentially")
+    # Create chunks - prefer page-aware if boundaries available
+    if page_boundaries:
+        chunks = _chunk_by_pages(markdown, page_boundaries, chunk_size)
+        total_pages = len(page_boundaries)
+        logger.info(
+            f"Cleanup: Processing {len(chunks)} page-aligned chunks "
+            f"({total_pages} pages total)"
+        )
+    else:
+        chunks = _chunk_by_paragraphs(markdown, chunk_size)
+        logger.info(f"Cleanup: Processing {len(chunks)} paragraph-based chunks")
 
     # Initialize results with previous results if resuming
     cleaned_chunks: list[str] = list(previous_results) if previous_results else []
 
+    # Find starting index based on resume_from (which is the last completed end_page)
+    start_idx = 0
     if resume_from > 0:
-        logger.info(f"Cleanup: Resuming from chunk {resume_from}")
+        # Find the first chunk whose end_page > resume_from
+        for i, chunk in enumerate(chunks):
+            if chunk.end_page > resume_from:
+                start_idx = i
+                break
+        else:
+            # All chunks already done
+            start_idx = len(chunks)
+
+        if page_boundaries:
+            logger.info(f"Cleanup: Resuming after page {resume_from}")
+        else:
+            logger.info(f"Cleanup: Resuming from chunk {start_idx + 1}")
 
     # Process chunks sequentially with per-item checkpointing
-    for idx in range(resume_from, len(chunks)):
-        chunk_chars = len(chunks[idx])
-        logger.info(f"Cleanup: Processing chunk {idx + 1}/{len(chunks)} ({chunk_chars} chars)")
+    for idx in range(start_idx, len(chunks)):
+        chunk = chunks[idx]
+
+        if page_boundaries:
+            if chunk.start_page == chunk.end_page:
+                page_info = f"page {chunk.start_page}"
+            else:
+                page_info = f"pages {chunk.start_page}-{chunk.end_page}"
+            logger.info(
+                f"Cleanup: Processing chunk {idx + 1}/{len(chunks)} "
+                f"({page_info}, {len(chunk.content)} chars)"
+            )
+        else:
+            logger.info(
+                f"Cleanup: Processing chunk {idx + 1}/{len(chunks)} "
+                f"({len(chunk.content)} chars)"
+            )
 
         # Clean this chunk
-        result = await _cleanup_chunk(chunks[idx])
+        result = await _cleanup_chunk(chunk.content)
         cleaned_chunks.append(result)
 
         # Report progress and checkpoint after each item
@@ -117,9 +265,14 @@ async def cleanup_markdown(
             await on_progress(idx + 1, len(chunks))
 
         if on_checkpoint:
-            await on_checkpoint(idx + 1, cleaned_chunks)
+            # Checkpoint with the end_page of this chunk
+            await on_checkpoint(chunk.end_page, cleaned_chunks)
 
-    logger.info(f"Cleanup: Completed {len(chunks)} chunks")
+    if page_boundaries:
+        logger.info(f"Cleanup: Completed {len(chunks)} chunks ({total_pages} pages)")
+    else:
+        logger.info(f"Cleanup: Completed {len(chunks)} chunks")
+
     return "\n\n".join(cleaned_chunks)
 
 

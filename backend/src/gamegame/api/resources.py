@@ -9,7 +9,7 @@ from sqlmodel import select
 
 from gamegame.api.deps import AdminUser, CurrentUserOptional, SessionDep
 from gamegame.api.utils import get_game_by_id_or_slug
-from gamegame.models import Attachment, Fragment, Resource
+from gamegame.models import Attachment, Fragment, Resource, Segment
 from gamegame.models.resource import ResourceRead, ResourceStatus, ResourceType, ResourceUpdate
 from gamegame.services.storage import storage
 from gamegame.tasks import queue
@@ -22,8 +22,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def resource_to_read(resource: Resource, fragment_count: int = 0) -> ResourceRead:
-    """Convert Resource model to ResourceRead schema with fragment count."""
+def resource_to_read(
+    resource: Resource, segment_count: int = 0, fragment_count: int = 0
+) -> ResourceRead:
+    """Convert Resource model to ResourceRead schema with counts."""
     return ResourceRead(
         id=resource.id,
         game_id=resource.game_id,
@@ -42,6 +44,7 @@ def resource_to_read(resource: Resource, fragment_count: int = 0) -> ResourceRea
         page_count=resource.page_count,
         image_count=resource.image_count,
         word_count=resource.word_count,
+        segment_count=segment_count,
         fragment_count=fragment_count,
     )
 
@@ -59,7 +62,15 @@ async def list_game_resources(
     """List all resources for a game."""
     game = await get_game_by_id_or_slug(game_id_or_slug, session)
 
-    # Get resources with fragment counts using a subquery
+    # Get resources with segment and fragment counts using subqueries
+    segment_count_subq = (
+        select(
+            Segment.resource_id,
+            func.count(1).label("segment_count"),
+        )
+        .group_by(Segment.resource_id)
+        .subquery()
+    )
     fragment_count_subq = (
         select(
             Fragment.resource_id,
@@ -72,7 +83,12 @@ async def list_game_resources(
     stmt = (
         select(
             Resource,
+            func.coalesce(segment_count_subq.c.segment_count, 0).label("segment_count"),
             func.coalesce(fragment_count_subq.c.fragment_count, 0).label("fragment_count"),
+        )
+        .outerjoin(
+            segment_count_subq,
+            Resource.id == segment_count_subq.c.resource_id,  # type: ignore[arg-type]
         )
         .outerjoin(
             fragment_count_subq,
@@ -84,7 +100,10 @@ async def list_game_resources(
     result = await session.execute(stmt)
     rows = result.all()
 
-    return [resource_to_read(resource, fragment_count) for resource, fragment_count in rows]
+    return [
+        resource_to_read(resource, segment_count, fragment_count)
+        for resource, segment_count, fragment_count in rows
+    ]
 
 
 @game_resources_router.post("", response_model=ResourceRead, status_code=status.HTTP_201_CREATED)
@@ -172,14 +191,16 @@ async def get_resource(
             detail="Resource not found",
         )
 
-    # Get fragment count
-    fragment_count_stmt = select(func.count(1)).where(
-        Fragment.resource_id == resource_id
-    )
+    # Get segment and fragment counts
+    segment_count_stmt = select(func.count(1)).where(Segment.resource_id == resource_id)
+    segment_count_result = await session.execute(segment_count_stmt)
+    segment_count = segment_count_result.scalar() or 0
+
+    fragment_count_stmt = select(func.count(1)).where(Fragment.resource_id == resource_id)
     fragment_count_result = await session.execute(fragment_count_stmt)
     fragment_count = fragment_count_result.scalar() or 0
 
-    return resource_to_read(resource, fragment_count)
+    return resource_to_read(resource, segment_count, fragment_count)
 
 
 @router.patch("/{resource_id}", response_model=ResourceRead)
@@ -207,14 +228,16 @@ async def update_resource(
     await session.commit()
     await session.refresh(resource)
 
-    # Get fragment count
-    fragment_count_stmt = select(func.count(1)).where(
-        Fragment.resource_id == resource_id
-    )
+    # Get segment and fragment counts
+    segment_count_stmt = select(func.count(1)).where(Segment.resource_id == resource_id)
+    segment_count_result = await session.execute(segment_count_stmt)
+    segment_count = segment_count_result.scalar() or 0
+
+    fragment_count_stmt = select(func.count(1)).where(Fragment.resource_id == resource_id)
     fragment_count_result = await session.execute(fragment_count_stmt)
     fragment_count = fragment_count_result.scalar() or 0
 
-    return resource_to_read(resource, fragment_count)
+    return resource_to_read(resource, segment_count, fragment_count)
 
 
 @router.delete("/{resource_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -271,8 +294,11 @@ async def reprocess_resource(
 ):
     """Trigger reprocessing of a resource (admin only).
 
-    Optionally specify a start_stage to resume from a specific stage:
-    - ingest, vision, cleanup, metadata, embed, finalize
+    By default, resumes from the stage where processing failed.
+    Optionally specify a start_stage to start from a specific stage:
+    - ingest, vision, cleanup, metadata, segment, embed, finalize
+
+    Use start_stage=ingest to force a full reprocess from the beginning.
     """
     stmt = select(Resource).where(Resource.id == resource_id)
     result = await session.execute(stmt)
@@ -284,10 +310,18 @@ async def reprocess_resource(
             detail="Resource not found",
         )
 
+    # Determine which stage to start from:
+    # - If start_stage is explicitly provided, use that
+    # - Otherwise, resume from the stage where it failed (if any)
+    effective_start_stage = start_stage
+    if effective_start_stage is None and resource.processing_stage is not None:
+        effective_start_stage = resource.processing_stage.value
+
     # Update status to queued for reprocessing
     resource.status = ResourceStatus.QUEUED
-    resource.processing_stage = None
     resource.error_message = None
+    # Don't clear processing_stage - it's used for resume and will be
+    # updated by the pipeline as it progresses
 
     await session.commit()
     await session.refresh(resource)
@@ -296,15 +330,17 @@ async def reprocess_resource(
     await queue.enqueue(
         "process_resource",
         resource_id=resource_id,
-        start_stage=start_stage,
+        start_stage=effective_start_stage,
         timeout=PIPELINE_TIMEOUT_SECONDS,
     )
 
-    # Get fragment count
-    fragment_count_stmt = select(func.count(1)).where(
-        Fragment.resource_id == resource_id
-    )
+    # Get segment and fragment counts
+    segment_count_stmt = select(func.count(1)).where(Segment.resource_id == resource_id)
+    segment_count_result = await session.execute(segment_count_stmt)
+    segment_count = segment_count_result.scalar() or 0
+
+    fragment_count_stmt = select(func.count(1)).where(Fragment.resource_id == resource_id)
     fragment_count_result = await session.execute(fragment_count_stmt)
     fragment_count = fragment_count_result.scalar() or 0
 
-    return resource_to_read(resource, fragment_count)
+    return resource_to_read(resource, segment_count, fragment_count)
