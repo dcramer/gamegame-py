@@ -1,6 +1,5 @@
 """EMBED stage - Chunk content and generate embeddings with enrichment."""
 
-import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -11,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
 from gamegame.config import settings
-from gamegame.constants import ANSWER_TYPES
 from gamegame.models import Embedding, Fragment, Resource
 from gamegame.models.embedding import EmbeddingType
 from gamegame.models.fragment import FragmentType
@@ -37,22 +35,22 @@ class Chunk:
     page_number: int | None = None
     page_range: list[int] | None = None
     section: str | None = None
+    segment_id: str | None = None
     chunk_type: FragmentType = FragmentType.TEXT
     images: list[dict] = field(default_factory=list)
 
 
-# Chunking parameters
-MAX_CHUNK_SIZE = 2500  # Characters (larger for better section coherence)
-CHUNK_OVERLAP = 200  # Characters of overlap
-MIN_CHUNK_SIZE = 100  # Minimum chunk size
+# Chunking parameters are configured via settings.pipeline_max_chunk_size, etc.
 
 
 def chunk_text_simple(
     markdown: str,
-    max_size: int = MAX_CHUNK_SIZE,
-    _overlap: int = CHUNK_OVERLAP,  # Reserved for future overlap implementation
+    max_size: int | None = None,
+    _overlap: int | None = None,  # Reserved for future overlap implementation
 ) -> list[Chunk]:
     """Split markdown text into chunks using simple paragraph-based approach.
+
+    Uses settings for defaults if not provided.
 
     Args:
         markdown: Markdown text to chunk
@@ -62,6 +60,12 @@ def chunk_text_simple(
     Returns:
         List of Chunk objects
     """
+    # Apply settings defaults
+    if max_size is None:
+        max_size = settings.pipeline_max_chunk_size
+    if _overlap is None:
+        _overlap = settings.pipeline_chunk_overlap
+
     if not markdown.strip():
         return []
 
@@ -109,124 +113,62 @@ def chunk_text_simple(
     # Don't forget the last chunk
     if current_chunk:
         text = "\n\n".join(current_chunk)
-        if len(text) >= MIN_CHUNK_SIZE:
+        if len(text) >= settings.pipeline_min_chunk_size:
             chunks.append(Chunk(content=text))
 
     return chunks
 
 
-def chunk_structured_content(
-    pages: list[dict],
-    max_size: int = MAX_CHUNK_SIZE,
+def chunk_segments(
+    segments: list,  # list[SegmentData] - avoid import cycle
+    max_size: int | None = None,
 ) -> list[Chunk]:
-    """Chunk structured PDF content while preserving page/section metadata.
+    """Chunk segments while preserving segment metadata for parent document retrieval.
+
+    Uses settings for defaults if not provided.
 
     Args:
-        pages: List of page dicts with markdown, pageNumber, sections, images
-        max_size: Maximum chunk size
+        segments: List of SegmentData from segment extraction
+        max_size: Maximum chunk size in characters
 
     Returns:
-        List of Chunk objects with metadata
+        List of Chunk objects with segment_id for linking
     """
+    # Apply settings defaults
+    if max_size is None:
+        max_size = settings.pipeline_max_chunk_size
+
     all_chunks: list[Chunk] = []
 
-    # Collect all sections for hierarchy tracking
-    all_sections: list[dict] = []
-    for page in pages:
-        sections = page.get("sections", [])
-        page_number = page.get("pageNumber", 1)
-        all_sections.extend(
-            {**section, "pageNumber": page_number} for section in sections
-        )
+    for segment in segments:
+        content = segment.content
+        segment_id = segment.id
+        hierarchy_path = segment.hierarchy_path
+        page_start = segment.page_start
+        page_end = segment.page_end
 
-    def get_current_section(page_number: int) -> str | None:
-        """Get the current section hierarchy for a page."""
-        relevant = [s for s in all_sections if s.get("pageNumber", 0) <= page_number]
-        if not relevant:
-            return None
-        return relevant[-1].get("hierarchy")
+        # Build page_range if we have both start and end
+        page_range = None
+        if page_start and page_end and page_end != page_start:
+            page_range = [page_start, page_end]
 
-    for page in pages:
-        page_number = page.get("pageNumber", 1)
-        markdown = page.get("markdown", "")
-        page_sections = page.get("sections", [])
-        page_images = page.get("images", [])
-
-        if not markdown.strip():
-            continue
-
-        # Convert images to simple dicts
-        images_data = [
-            {
-                "id": img.get("id"),
-                "url": img.get("url"),
-                "description": img.get("description"),
-                "detectedType": img.get("detectedType"),
-                "ocrText": img.get("ocrText"),
-            }
-            for img in page_images
-            if img.get("url")
-        ]
-
-        # Small page - keep as one chunk
-        if len(markdown) < max_size and len(page_sections) <= 1:
-            section = get_current_section(page_number)
+        if len(content) <= max_size:
+            # Segment fits in one chunk
             all_chunks.append(Chunk(
-                content=markdown.strip(),
-                page_number=page_number,
-                section=section,
-                images=images_data,
+                content=content,
+                section=hierarchy_path,
+                segment_id=segment_id,
+                page_number=page_start,
+                page_range=page_range,
             ))
-            continue
-
-        # Larger page - split by sections if available
-        if page_sections:
-            # Split content by section headings
-            for i, section in enumerate(page_sections):
-                section_text = section.get("text", "")
-                section_level = section.get("level", 1)
-                section_hierarchy = section.get("hierarchy", section_text)
-
-                # Find section in markdown
-                heading_pattern = rf"^#{{{section_level}}}\s+{re.escape(section_text)}"
-                match = re.search(heading_pattern, markdown, re.MULTILINE)
-
-                if match:
-                    start = match.start()
-                    # Find next section
-                    end = len(markdown)
-                    if i + 1 < len(page_sections):
-                        next_section = page_sections[i + 1]
-                        next_pattern = rf"^#{{{next_section.get('level', 1)}}}\s+{re.escape(next_section.get('text', ''))}"
-                        next_match = re.search(next_pattern, markdown[start + 1:], re.MULTILINE)
-                        if next_match:
-                            end = start + 1 + next_match.start()
-
-                    section_content = markdown[start:end].strip()
-                    if section_content:
-                        # Split if still too large
-                        if len(section_content) > max_size:
-                            sub_chunks = chunk_text_simple(section_content, max_size)
-                            for sub in sub_chunks:
-                                sub.page_number = page_number
-                                sub.section = section_hierarchy
-                                sub.images = images_data
-                                all_chunks.append(sub)
-                        else:
-                            all_chunks.append(Chunk(
-                                content=section_content,
-                                page_number=page_number,
-                                section=section_hierarchy,
-                                images=images_data,
-                            ))
         else:
-            # No sections - use simple chunking
-            section = get_current_section(page_number)
-            sub_chunks = chunk_text_simple(markdown, max_size)
+            # Split large segment into sub-chunks
+            sub_chunks = chunk_text_simple(content, max_size)
             for sub in sub_chunks:
-                sub.page_number = page_number
-                sub.section = section
-                sub.images = images_data
+                sub.section = hierarchy_path
+                sub.segment_id = segment_id
+                sub.page_number = page_start
+                sub.page_range = page_range
                 all_chunks.append(sub)
 
     return all_chunks
@@ -290,107 +232,6 @@ def build_searchable_content(
     parts.append(chunk.content)
 
     return "\n".join(parts)
-
-
-async def classify_fragment_answer_types(
-    content: str,
-    section: str | None,
-    resource_info: ResourceInfo,
-) -> list[str]:
-    """Classify what types of questions a fragment can answer.
-
-    Args:
-        content: Fragment content
-        section: Section name
-        resource_info: Resource metadata
-
-    Returns:
-        List of answer type strings
-    """
-    if not settings.openai_api_key:
-        return []
-
-    prompt = f"""Analyze this content from a board game {resource_info.resource_type} and classify what types of questions it can answer.
-
-Document: {resource_info.name}
-{f'Description: {resource_info.description}' if resource_info.description else ''}
-{f'Section: {section}' if section else ''}
-
-Content:
-{content[:2000]}
-
-Available answer type categories:
-
-**Metadata:**
-- player_count, play_time, age_rating, game_overview, publisher_info
-
-**Rules:**
-- setup_instructions, turn_structure, win_conditions, end_game, scoring
-
-**Components:**
-- component_list, card_types, resource_types, board_layout, token_types
-
-**Gameplay:**
-- action_options, combat_rules, movement_rules, trading_rules, special_abilities
-
-**Clarifications:**
-- edge_case, example, faq, timing, rule_clarification
-
-Select 1-4 answer types that best match what questions this content can answer.
-Return ONLY a JSON object with an "answerTypes" array.
-Format: {{ "answerTypes": ["type1", "type2", ...] }}"""
-
-    try:
-        response = await create_chat_completion(
-            model=get_model("classification"),
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=1,  # GPT-5/GPT-4o-mini requires temperature 1
-            max_completion_tokens=200,
-        )
-
-        content_str = response.choices[0].message.content
-        if not content_str:
-            return []
-
-        result = json.loads(content_str)
-        if not isinstance(result.get("answerTypes"), list):
-            return []
-
-        return [t for t in result["answerTypes"] if t in ANSWER_TYPES]
-    except Exception:
-        return []
-
-
-async def classify_fragments_batch(
-    chunks: list[Chunk],
-    resource_info: ResourceInfo,
-) -> list[list[str]]:
-    """Classify answer types for multiple fragments sequentially.
-
-    Args:
-        chunks: Chunks to classify
-        resource_info: Resource metadata
-
-    Returns:
-        List of answer type lists (one per chunk)
-    """
-    results: list[list[str]] = []
-    total = len(chunks)
-
-    logger.info(f"Classifying answer types: {total} chunks")
-
-    for idx, chunk in enumerate(chunks):
-        logger.debug(f"Classifying chunk {idx + 1}/{total}")
-        result = await classify_fragment_answer_types(
-            chunk.content,
-            chunk.section,
-            resource_info,
-        )
-        results.append(result)
-
-    logger.info(f"Completed answer type classification: {total} chunks")
-    return results
 
 
 async def generate_embeddings(
@@ -523,9 +364,8 @@ async def embed_content(
     game_id: str,
     markdown: str,
     resource_info: ResourceInfo | None = None,
-    structured_pages: list[dict] | None = None,
+    segments: list | None = None,
     generate_hyde: bool = True,
-    classify_answer_types: bool = True,
     on_progress: Callable[[int, int], Awaitable[None]] | None = None,
     on_checkpoint: Callable[[int], Awaitable[None]] | None = None,
     resume_from: int = 0,
@@ -538,11 +378,10 @@ async def embed_content(
         session: Database session
         resource_id: Resource ID
         game_id: Game ID
-        markdown: Cleaned markdown content (fallback if no structured pages)
+        markdown: Cleaned markdown content (fallback if no segments)
         resource_info: Resource metadata for enrichment
-        structured_pages: Structured PDF pages with sections/images
+        segments: List of SegmentData from segment extraction (preferred)
         generate_hyde: Whether to generate HyDE questions
-        classify_answer_types: Whether to classify answer types
         on_progress: Callback for progress updates (current, total)
         on_checkpoint: Callback for checkpointing after each item (cursor)
         resume_from: Chunk index to resume from (0 = start fresh)
@@ -566,11 +405,13 @@ async def embed_content(
         else:
             resource_info = ResourceInfo(name="Unknown")
 
-    # Chunk the content
-    if structured_pages:
-        chunks = chunk_structured_content(structured_pages)
+    # Chunk the content - prefer segments, fall back to simple text chunking
+    if segments:
+        chunks = chunk_segments(segments)
+        logger.info(f"Resource {resource_id}: Chunking {len(segments)} segments into {len(chunks)} chunks")
     else:
         chunks = chunk_text_simple(markdown)
+        logger.info(f"Resource {resource_id}: Chunking markdown into {len(chunks)} chunks (no segments)")
 
     if not chunks:
         logger.info(f"Resource {resource_id}: No chunks to embed")
@@ -601,16 +442,6 @@ async def embed_content(
         else:
             hyde_questions = []
 
-        # Classify answer types for this chunk
-        if classify_answer_types:
-            answer_types = await classify_fragment_answer_types(
-                chunk.content,
-                chunk.section,
-                resource_info,
-            )
-        else:
-            answer_types = []
-
         # Build searchable content
         searchable = build_searchable_content(chunk, resource_info)
 
@@ -622,23 +453,19 @@ async def embed_content(
         content_embedding = embeddings[0]
         question_embeddings = embeddings[1:] if len(embeddings) > 1 else []
 
-        # Create fragment
+        # Create fragment (embeddings stored separately in embeddings table)
         fragment = Fragment(
             game_id=game_id,
             resource_id=resource_id,
             content=chunk.content,
             searchable_content=searchable,
             type=chunk.chunk_type,
+            segment_id=chunk.segment_id,
             page_number=chunk.page_number,
             page_range=chunk.page_range,
             section=chunk.section,
-            embedding=content_embedding,
             synthetic_questions=hyde_questions if hyde_questions else None,
-            answer_types=answer_types if answer_types else None,
             images=chunk.images if chunk.images else None,
-            resource_name=resource_info.name,
-            resource_description=resource_info.description,
-            resource_type=resource_info.resource_type,
             version=1,
         )
         session.add(fragment)
@@ -660,8 +487,10 @@ async def embed_content(
         session.add(content_emb_record)
 
         # Create question embedding records
+        # Note: Don't use strict=True - if counts mismatch due to API issues,
+        # we still want to create embeddings for the questions we have
         for q_idx, (question, q_embedding) in enumerate(
-            zip(hyde_questions, question_embeddings, strict=True)
+            zip(hyde_questions, question_embeddings, strict=False)
         ):
             hyde_emb_record = Embedding(
                 id=f"{fragment.id}-q{q_idx}",

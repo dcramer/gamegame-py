@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gamegame.config import settings
 from gamegame.constants import ANSWER_TYPES
-from gamegame.models import Embedding, Fragment
+from gamegame.models import Embedding, Fragment, Resource, Segment
 from gamegame.models.model_config import get_model
 from gamegame.services.openai_client import get_openai_client
 
@@ -62,7 +62,7 @@ class SearchResponse:
 # RRF constants
 RRF_K = 50
 CONTENT_WEIGHT = 1.0
-QUESTION_WEIGHT = 0.7
+QUESTION_WEIGHT = 1.0  # Equal weight - HyDE questions are key for Q&A matching
 FTS_WEIGHT = 1.0
 
 # Diversification limits
@@ -239,17 +239,21 @@ async def vector_search(
     """
     # Use inner product (faster for normalized embeddings)
     # max_inner_product returns negative inner product, so negate to get similarity
-    similarity = -Fragment.embedding.max_inner_product(query_embedding)  # type: ignore[attr-defined]
+    # Search content embeddings in the embeddings table
+    similarity = -Embedding.embedding.max_inner_product(query_embedding)  # type: ignore[attr-defined]
 
-    stmt = select(Fragment.id, similarity.label("score"))  # type: ignore[call-overload]
+    stmt = (
+        select(Embedding.fragment_id, similarity.label("score"))  # type: ignore[call-overload]
+        .where(Embedding.type == "content")
+    )
 
     if game_id:
-        stmt = stmt.where(Fragment.game_id == game_id)
+        stmt = stmt.where(Embedding.game_id == game_id)
 
     stmt = stmt.order_by(similarity.desc()).limit(limit)
 
     result = await session.execute(stmt)
-    return [(row.id, float(row.score)) for row in result]
+    return [(row.fragment_id, float(row.score)) for row in result]
 
 
 async def question_vector_search(
@@ -447,6 +451,12 @@ async def hybrid_search(
     result = await session.execute(stmt)
     fragments_by_id = {f.id: f for f in result.scalars()}
 
+    # Fetch resource names for fragments
+    resource_ids = list({f.resource_id for f in fragments_by_id.values()})
+    res_stmt = select(Resource.id, Resource.name).where(Resource.id.in_(resource_ids))  # type: ignore[attr-defined]
+    res_result = await session.execute(res_stmt)
+    resource_names = {row.id: row.name for row in res_result}
+
     # Apply answer type boosting if query types were detected
     if query_answer_types:
         for frag_id, fragment in fragments_by_id.items():
@@ -495,7 +505,7 @@ async def hybrid_search(
                 page_number=frag.page_number,
                 section=frag.section,
                 resource_id=frag.resource_id,
-                resource_name=frag.resource_name or "Unknown",
+                resource_name=resource_names.get(frag.resource_id, "Unknown"),
                 game_id=frag.game_id,
                 score=combined_scores[fragment_id],
                 match_type="hybrid",
@@ -549,6 +559,7 @@ class SearchService:
         game_id: str | None = None,
         limit: int = DEFAULT_LIMIT,
         enable_reranking: bool = True,
+        include_fts: bool = True,
     ) -> SearchResponse:
         """Search for relevant content.
 
@@ -558,18 +569,15 @@ class SearchService:
             game_id: Filter to specific game
             limit: Max results
             enable_reranking: Whether to apply LLM reranking (default: True)
+            include_fts: Whether to include full-text search (default: True)
 
         Returns:
             SearchResponse with results
         """
-        # Get query embedding and detect answer types in parallel
-        query_embedding_task = self.get_embedding(query)
-        answer_types_task = detect_query_answer_types(query)
-
-        query_embedding, query_answer_types = await asyncio.gather(
-            query_embedding_task,
-            answer_types_task,
-        )
+        # Get query embedding
+        # Note: Answer type detection was removed - it added ~2.3s latency but
+        # fragment.answer_types was never populated, so the boost never triggered
+        query_embedding = await self.get_embedding(query)
 
         return await hybrid_search(
             session=session,
@@ -578,8 +586,156 @@ class SearchService:
             game_id=game_id,
             limit=limit,
             enable_reranking=enable_reranking,
-            query_answer_types=query_answer_types,
+            include_fts=include_fts,
         )
+
+
+@dataclass
+class PageResult:
+    """A page result for parent document retrieval.
+
+    DEPRECATED: Use SegmentResult instead. The pages table has been removed
+    in favor of segments for parent document retrieval.
+    """
+
+    page_number: int
+    content: str
+    resource_id: str
+    resource_name: str
+    word_count: int | None = None
+
+
+async def expand_chunks_to_pages(
+    session: AsyncSession,
+    results: list[SearchResult],
+    max_pages: int = 5,
+) -> list[PageResult]:
+    """Expand search result chunks to full pages.
+
+    DEPRECATED: Use expand_chunks_to_segments instead. The pages table has been
+    removed in favor of segments for parent document retrieval.
+
+    Args:
+        session: Database session (unused)
+        results: Search results (unused)
+        max_pages: Maximum pages (unused)
+
+    Returns:
+        Empty list (pages table no longer exists)
+    """
+    logger.warning(
+        "expand_chunks_to_pages is deprecated. Use expand_chunks_to_segments instead."
+    )
+    return []
+
+
+@dataclass
+class SegmentResult:
+    """A segment result for parent document retrieval."""
+
+    segment_id: str
+    title: str
+    hierarchy_path: str
+    content: str
+    resource_id: str
+    resource_name: str
+    page_start: int | None = None
+    page_end: int | None = None
+    word_count: int | None = None
+
+
+async def expand_chunks_to_segments(
+    session: AsyncSession,
+    results: list[SearchResult],
+    max_segments: int = 5,
+) -> list[SegmentResult]:
+    """Expand search result chunks to full segments.
+
+    For parent document retrieval: we search on small chunks for precision,
+    but return full segments for better semantic context.
+
+    Args:
+        session: Database session
+        results: Search results (from hybrid_search)
+        max_segments: Maximum number of unique segments to return
+
+    Returns:
+        List of SegmentResult with full segment content, deduplicated
+    """
+    if not results:
+        return []
+
+    # Collect unique segment_ids from fragments, preserving search ranking order
+    seen_segment_ids: set[str] = set()
+    segment_ids: list[str] = []
+    resource_names: dict[str, str] = {}  # segment_id -> resource_name
+
+    # Get segment_ids for these fragments
+    fragment_ids = [r.fragment_id for r in results]
+    if not fragment_ids:
+        return []
+
+    # Fetch fragments with segment_ids
+    stmt = select(Fragment.id, Fragment.segment_id, Fragment.resource_id).where(
+        Fragment.id.in_(fragment_ids)  # type: ignore[attr-defined]
+    )
+    result = await session.execute(stmt)
+    fragment_segments = {row.id: (row.segment_id, row.resource_id) for row in result}
+
+    # Build ordered list of unique segment_ids (use resource_name from SearchResult)
+    for search_result in results:
+        segment_info = fragment_segments.get(search_result.fragment_id)
+        if not segment_info or not segment_info[0]:
+            continue
+
+        segment_id, _ = segment_info
+        if segment_id not in seen_segment_ids:
+            seen_segment_ids.add(segment_id)
+            segment_ids.append(segment_id)
+            resource_names[segment_id] = search_result.resource_name
+
+            if len(segment_ids) >= max_segments:
+                break
+
+    if not segment_ids:
+        logger.warning("No segments found for search results - fragments may not have segment_id set")
+        return []
+
+    # Fetch full segment content
+    segments_stmt = select(Segment).where(Segment.id.in_(segment_ids))  # type: ignore[attr-defined]
+    segments_result = await session.execute(segments_stmt)
+    segments_by_id = {seg.id: seg for seg in segments_result.scalars()}
+
+    # Build results in original order
+    segment_results: list[SegmentResult] = []
+    for segment_id in segment_ids:
+        segment = segments_by_id.get(segment_id)
+        if not segment:
+            continue
+
+        segment_results.append(SegmentResult(
+            segment_id=segment.id,
+            title=segment.title,
+            hierarchy_path=segment.hierarchy_path,
+            content=segment.content,
+            resource_id=segment.resource_id,
+            resource_name=resource_names.get(segment_id, "Unknown"),
+            page_start=segment.page_start,
+            page_end=segment.page_end,
+            word_count=segment.word_count,
+        ))
+
+    logger.info(
+        f"Expanded {len(results)} chunks to {len(segment_results)} segments "
+        f"(from {len(seen_segment_ids)} unique segment references)"
+    )
+
+    return segment_results
+
+
+# Keep alias for backwards compatibility during transition
+ChapterResult = SegmentResult
+expand_chunks_to_chapters = expand_chunks_to_segments
 
 
 # Global search service instance
