@@ -1,9 +1,10 @@
 """Resource model for PDFs and other documents."""
 
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, DateTime
 from sqlmodel import Field, SQLModel
 
 from gamegame.models.base import TimestampMixin, generate_nanoid
@@ -35,7 +36,8 @@ class ProcessingStage(str, Enum):
     INGEST = "ingest"
     VISION = "vision"
     CLEANUP = "cleanup"
-    METADATA = "metadata"
+    METADATA = "metadata"  # Name/description generation
+    SEGMENT = "segment"  # Segment extraction
     EMBED = "embed"
     FINALIZE = "finalize"
 
@@ -70,7 +72,9 @@ class Resource(TimestampMixin, SQLModel, table=True):
     processing_stage: ProcessingStage | None = Field(default=None)
     processing_metadata: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     current_run_id: str | None = Field(default=None, max_length=255)
-    processed_at: str | None = Field(default=None)
+    processed_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
     error_message: str | None = Field(default=None)
 
     # Stats
@@ -109,6 +113,7 @@ class ResourceRead(SQLModel):
     page_count: int | None
     image_count: int | None
     word_count: int | None
+    segment_count: int = 0
     fragment_count: int = 0
 
 

@@ -26,6 +26,7 @@ def get_queue_settings() -> dict:
     # Import here to avoid circular imports
     from gamegame.tasks.attachments import analyze_attachment
     from gamegame.tasks.maintenance import (
+        cleanup_bgg_cache,
         cleanup_orphaned_blobs,
         prune_workflow_runs,
         recover_stalled_workflows,
@@ -40,6 +41,8 @@ def get_queue_settings() -> dict:
         CronJob(prune_workflow_runs, cron="0 3 * * *"),
         # Clean up orphaned blobs weekly on Sunday at 4am
         CronJob(cleanup_orphaned_blobs, cron="0 4 * * 0"),
+        # Clean up stale BGG cache entries weekly on Sunday at 5am
+        CronJob(cleanup_bgg_cache, cron="0 5 * * 0"),
     ]
 
     return {
@@ -48,6 +51,7 @@ def get_queue_settings() -> dict:
             process_resource,
             analyze_attachment,
             cleanup_orphaned_blobs,
+            cleanup_bgg_cache,
             prune_workflow_runs,
             recover_stalled_workflows,
         ],
@@ -159,10 +163,18 @@ async def enqueue(
         **kwargs: Arguments to pass to the task
 
     Returns:
-        Job ID
+        Job key (used as run_id for workflow tracking)
     """
+    import uuid
+
+    # Generate a unique key if not provided - SAQ needs an explicit key
+    # for us to track the workflow run_id properly
+    if key is None:
+        key = str(uuid.uuid4())
+
     job = await queue.enqueue(function_name, timeout=timeout, key=key, **kwargs)
     if job is None:
         raise RuntimeError(f"Failed to enqueue task: {function_name}")
     logger.info(f"Enqueued task: {function_name} (id={job.id})")
-    return job.id
+    # Return the key, not job.id, since pipeline uses job.key for run_id
+    return key

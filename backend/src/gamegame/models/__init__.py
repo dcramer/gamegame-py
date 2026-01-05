@@ -7,6 +7,7 @@ from gamegame.models.embedding import Embedding
 from gamegame.models.fragment import Fragment
 from gamegame.models.game import Game
 from gamegame.models.resource import Resource, ResourceStatus, ResourceType
+from gamegame.models.segment import Segment
 from gamegame.models.user import User
 from gamegame.models.verification_token import VerificationToken
 from gamegame.models.workflow_run import WorkflowRun, WorkflowStatus
@@ -21,6 +22,7 @@ __all__ = [
     "Resource",
     "ResourceStatus",
     "ResourceType",
+    "Segment",
     "TimestampMixin",
     "User",
     "VerificationToken",

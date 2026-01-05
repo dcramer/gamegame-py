@@ -577,7 +577,7 @@ For each fragment:
 
 ### 6.1 processResourceWorkflow
 **Trigger:** Resource creation
-**Stages:** ingest → vision → cleanup → metadata → embed → finalize
+**Stages:** ingest → vision → cleanup → metadata → segment → embed → finalize
 **Resumable:** Can restart from specific stage
 
 ### 6.2 analyzeImagesWorkflow

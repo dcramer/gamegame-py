@@ -140,24 +140,29 @@ async def retry_workflow(
                 detail="Associated resource not found",
             )
 
-        # Reset resource status and trigger reprocessing
+        # Get the stage where it failed from the workflow's extra_data
+        # This allows retry to resume from the failed stage instead of restarting
+        start_stage = (workflow.extra_data or {}).get("last_stage")
+
+        # Reset resource status but preserve processing_stage for resume
         resource.status = ResourceStatus.QUEUED
-        resource.processing_stage = None
         resource.error_message = None
+        # Don't reset processing_stage or processing_metadata - they're needed for resume
 
         await session.commit()
 
-        # Enqueue new processing task with incremented retry count
+        # Enqueue new processing task with incremented retry count and start_stage
         new_run_id = await enqueue(
             "process_resource",
             resource_id=workflow.resource_id,
+            start_stage=start_stage,
             retry_count=retry_count + 1,
             timeout=PIPELINE_TIMEOUT_SECONDS,
         )
 
         return RetryResponse(
             success=True,
-            message="Workflow retried",
+            message=f"Workflow retried from {start_stage}" if start_stage else "Workflow retried",
             run_id=new_run_id,
         )
 

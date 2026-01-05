@@ -1,6 +1,5 @@
 """VISION stage - Analyze images using GPT-4o vision."""
 
-import asyncio
 import base64
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -9,6 +8,7 @@ from enum import Enum
 from gamegame.config import settings
 from gamegame.models.model_config import get_model
 from gamegame.services.openai_client import create_chat_completion
+from gamegame.utils.image import detect_mime_type, strip_data_url_prefix
 
 
 class ImageType(str, Enum):
@@ -171,55 +171,7 @@ def _build_context_string(context: ImageAnalysisContext) -> str:
     return "\n".join(parts)
 
 
-def _detect_mime_type(image_bytes: bytes) -> str:
-    """Detect image MIME type from magic bytes.
-
-    Supports common formats including both OpenAI-supported formats
-    (PNG, JPEG, WebP, GIF) and unsupported formats (TIFF, BMP, JPEG2000)
-    for better error messages.
-    """
-    if len(image_bytes) < 12:
-        return "application/octet-stream"
-
-    # Magic byte signatures for different image formats
-    mime_types = [
-        (b"\x89PNG\r\n\x1a\n", 0, 8, "image/png"),
-        (b"\xff\xd8\xff", 0, 3, "image/jpeg"),
-        ((b"GIF87a", b"GIF89a"), 0, 6, "image/gif"),
-        (b"BM", 0, 2, "image/bmp"),
-        ((b"II\x2a\x00", b"MM\x00\x2a"), 0, 4, "image/tiff"),
-        (b"\x00\x00\x01\x00", 0, 4, "image/x-icon"),
-    ]
-
-    for pattern, offset, length, mime in mime_types:
-        data = image_bytes[offset : offset + length]
-        if isinstance(pattern, tuple):
-            if data in pattern:
-                return mime
-        elif data == pattern:
-            return mime
-
-    # WebP requires checking two separate regions
-    if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
-        return "image/webp"
-
-    # JPEG2000 has specific signature
-    if image_bytes[:4] == b"\x00\x00\x00\x0c" and image_bytes[4:8] == b"jP  ":
-        return "image/jp2"
-
-    return "application/octet-stream"
-
-
-def _strip_data_url_prefix(base64_data: str) -> str:
-    """Strip data URL prefix from base64 string if present.
-
-    Mistral OCR returns base64 data with format: data:image/jpeg;base64,/9j/4AAQ...
-    We need to strip the prefix to get the raw base64 data.
-    """
-    if base64_data.startswith("data:"):
-        # Split on first comma and take the base64 part
-        return base64_data.split(",", 1)[1]
-    return base64_data
+# Note: detect_mime_type and strip_data_url_prefix are imported from gamegame.utils.image
 
 
 async def analyze_single_image(
@@ -242,10 +194,10 @@ async def analyze_single_image(
     if isinstance(image_data, bytes):
         image_bytes = image_data
     else:
-        base64_str = _strip_data_url_prefix(image_data)
+        base64_str = strip_data_url_prefix(image_data)
         image_bytes = base64.b64decode(base64_str)
 
-    mime_type = _detect_mime_type(image_bytes)
+    mime_type = detect_mime_type(image_bytes)
 
     # Check if the format is supported by OpenAI Vision API
     supported_formats = {"image/png", "image/jpeg", "image/gif", "image/webp"}
@@ -304,13 +256,13 @@ async def analyze_single_image(
 
 async def analyze_images_batch(
     images: list[tuple[bytes | str, ImageAnalysisContext]],
-    on_progress: Callable[[int, int], None] | Callable[[int, int], Awaitable[None]] | None = None,
+    on_progress: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> list[ImageAnalysisResult]:
     """Analyze multiple images sequentially.
 
     Args:
         images: List of (image_data, context) tuples
-        on_progress: Optional callback(completed, total) for progress updates
+        on_progress: Optional async callback(completed, total) for progress updates
 
     Returns:
         List of ImageAnalysisResult in same order as input
@@ -346,11 +298,9 @@ async def analyze_images_batch(
                 )
             )
 
-        # Progress callback (support both sync and async)
+        # Progress callback
         if on_progress:
-            callback_result = on_progress(idx + 1, total)
-            if asyncio.iscoroutine(callback_result):
-                await callback_result
+            await on_progress(idx + 1, total)
 
     logger.info(f"Completed image analysis: {total} images processed")
     return results

@@ -8,6 +8,7 @@ from openai import APIConnectionError, APITimeoutError, RateLimitError
 from sqlalchemy import delete
 from sqlmodel import select
 
+from gamegame.config import settings
 from gamegame.database import async_session_factory
 from gamegame.models import Attachment, Embedding, Fragment, Resource, Segment
 from gamegame.models.attachment import AttachmentType, DetectedType, QualityRating
@@ -31,6 +32,11 @@ from gamegame.services.workflow_tracking import (
     start_workflow_run,
     update_workflow_item_progress,
     update_workflow_progress,
+)
+from gamegame.utils.image import (
+    detect_mime_type_with_extension,
+    get_image_dimensions,
+    strip_data_url_prefix,
 )
 
 
@@ -90,6 +96,33 @@ def _classify_error(e: Exception) -> tuple[str, str, str]:
             "Check your internet connection.",
         )
 
+    # Configuration and validation errors
+    if isinstance(e, ValueError):
+        error_str = str(e)
+        if "API_KEY" in error_str or "not configured" in error_str.lower():
+            return (
+                "CONFIG_ERROR",
+                "Missing API configuration",
+                "Check that all required API keys are set in environment variables.",
+            )
+        if "missing required state keys" in error_str.lower():
+            return (
+                "STATE_ERROR",
+                "Pipeline state corrupted or incomplete",
+                "Try reprocessing from the beginning.",
+            )
+        return ("VALIDATION_ERROR", str(e), "Check input data and try again.")
+
+    # JSON parsing errors (from LLM responses)
+    from json import JSONDecodeError
+
+    if isinstance(e, JSONDecodeError):
+        return (
+            "PARSE_ERROR",
+            "Failed to parse AI response",
+            "The AI returned an invalid response. Try again.",
+        )
+
     # Generic fallback
     return ("PIPELINE_ERROR", str(e), "Try again or contact support.")
 
@@ -105,6 +138,43 @@ STAGE_ORDER = [
     ProcessingStage.EMBED,
     ProcessingStage.FINALIZE,
 ]
+
+# Required state keys for each stage (validated before stage execution)
+STAGE_REQUIRED_STATE: dict[ProcessingStage, list[str]] = {
+    # INGEST creates initial state, no requirements
+    ProcessingStage.INGEST: [],
+    # VISION needs raw markdown and page boundaries from INGEST
+    ProcessingStage.VISION: ["raw_markdown", "page_boundaries"],
+    # CLEANUP needs raw markdown (may be modified by VISION)
+    ProcessingStage.CLEANUP: ["raw_markdown"],
+    # METADATA needs cleaned markdown from CLEANUP
+    ProcessingStage.METADATA: ["cleaned_markdown"],
+    # SEGMENT needs cleaned markdown
+    ProcessingStage.SEGMENT: ["cleaned_markdown"],
+    # EMBED needs cleaned markdown (and segment_id_mapping if segments exist)
+    ProcessingStage.EMBED: ["cleaned_markdown"],
+    # FINALIZE has no specific requirements
+    ProcessingStage.FINALIZE: [],
+}
+
+
+def _validate_state_for_stage(state: dict[str, Any], stage: ProcessingStage) -> None:
+    """Validate that state contains required keys for the given stage.
+
+    Args:
+        state: Current pipeline state dict
+        stage: Stage about to be executed
+
+    Raises:
+        ValueError: If required keys are missing
+    """
+    required = STAGE_REQUIRED_STATE.get(stage, [])
+    missing = [key for key in required if key not in state]
+    if missing:
+        raise ValueError(
+            f"Cannot run stage {stage.value}: missing required state keys: {missing}. "
+            f"Available keys: {list(state.keys())}"
+        )
 
 
 async def process_resource(
@@ -187,6 +257,8 @@ async def process_resource(
 
             # Determine starting stage and load state
             state: dict[str, Any] = {}
+            # Track current stage for error reporting (avoid lazy loading after rollback)
+            current_stage_name: str | None = None
 
             if start_stage:
                 # Explicit start stage provided (manual reprocess or stall recovery)
@@ -197,6 +269,7 @@ async def process_resource(
                 # Load existing state if available
                 if resource.processing_metadata:
                     state = resource.processing_metadata
+                current_stage_name = start_stage
             elif (
                 resource.processing_stage is not None
                 and original_status == ResourceStatus.PROCESSING
@@ -205,9 +278,10 @@ async def process_resource(
                 # SAQ re-delivered the job, so we resume from the last checkpoint
                 current_stage_idx = STAGE_ORDER.index(resource.processing_stage)
                 state = resource.processing_metadata or {}
+                current_stage_name = resource.processing_stage.value
                 logger.info(
                     f"Resource {resource_id}: Auto-resuming from stage "
-                    f"{resource.processing_stage.value}"
+                    f"{current_stage_name}"
                 )
             else:
                 # Fresh start
@@ -215,12 +289,17 @@ async def process_resource(
 
             # Run stages
             for stage in STAGE_ORDER[current_stage_idx:]:
-                logger.info(f"Resource {resource_id}: Running stage {stage.value}")
+                # Track stage name for error reporting (before any DB operations)
+                current_stage_name = stage.value
+                logger.info(f"Resource {resource_id}: Running stage {current_stage_name}")
 
                 # Update current stage and workflow progress
                 resource.processing_stage = stage
-                await update_workflow_progress(session, run_id, stage.value)
+                await update_workflow_progress(session, run_id, current_stage_name)
                 await session.commit()
+
+                # Validate state has required keys for this stage
+                _validate_state_for_stage(state, stage)
 
                 # Run the stage
                 state = await _run_stage(session, resource, stage, state)
@@ -255,28 +334,30 @@ async def process_resource(
             return {"status": "completed", "resource_id": resource_id}
 
         except Exception as e:
-            logger.exception(f"Resource {resource_id}: Pipeline failed")
+            logger.exception(f"Resource {resource_id}: Pipeline failed at stage {current_stage_name}")
 
             # Classify the error for better user feedback
             error_code, user_message, suggestion = _classify_error(e)
 
-            # Capture context about where we failed (stack traces go to Sentry)
-            current_stage = resource.processing_stage.value if resource and resource.processing_stage else None
+            # Use cached current_stage_name instead of accessing ORM object
+            # (after rollback, ORM objects are expired and lazy loading fails)
             extra_context = {
-                "last_stage": current_stage,
+                "last_stage": current_stage_name,
                 "state_keys": list(state.keys()) if state else [],
                 "suggestion": suggestion,
             }
 
-            await mark_resource_failed(session, resource_id, user_message)
-            await fail_workflow_run(
-                session,
-                run_id,
-                user_message,
-                error_code,
-                extra_context=extra_context,
-            )
-            await session.commit()
+            # Rollback any aborted transaction, then record failure in a clean transaction
+            await session.rollback()
+            async with session.begin():
+                await mark_resource_failed(session, resource_id, user_message)
+                await fail_workflow_run(
+                    session,
+                    run_id,
+                    user_message,
+                    error_code,
+                    extra_context=extra_context,
+                )
             return {"status": "error", "message": user_message}
 
 
@@ -372,65 +453,8 @@ async def _stage_ingest(
     return state
 
 
-def _strip_data_url_prefix(base64_data: str) -> str:
-    """Strip data URL prefix from base64 string if present.
-
-    Mistral OCR returns base64 data with format: data:image/jpeg;base64,/9j/4AAQ...
-    This strips the prefix to get just the base64 content.
-
-    Args:
-        base64_data: Base64 string, possibly with data URL prefix
-
-    Returns:
-        Pure base64 string without prefix
-    """
-    if base64_data.startswith("data:"):
-        # Format: data:image/jpeg;base64,/9j/4AAQ...
-        return base64_data.split(",", 1)[1]
-    return base64_data
-
-
-def _get_image_dimensions(image_bytes: bytes) -> tuple[int | None, int | None]:
-    """Extract image dimensions from bytes.
-
-    Returns (width, height) tuple, or (None, None) if unable to determine.
-    """
-    import io
-
-    from PIL import Image
-
-    try:
-        with Image.open(io.BytesIO(image_bytes)) as img:
-            return img.width, img.height
-    except Exception:
-        return None, None
-
-
-def _detect_image_mime_type(image_bytes: bytes) -> tuple[str, str]:
-    """Detect image MIME type and extension from magic bytes.
-
-    Returns (mime_type, extension) tuple.
-    """
-    if len(image_bytes) < 12:
-        return "image/jpeg", "jpg"
-
-    # PNG: \x89PNG\r\n\x1a\n
-    if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
-        return "image/png", "png"
-
-    # JPEG: \xFF\xD8\xFF
-    if image_bytes[:3] == b"\xff\xd8\xff":
-        return "image/jpeg", "jpg"
-
-    # WebP: RIFF....WEBP
-    if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
-        return "image/webp", "webp"
-
-    # GIF magic bytes
-    if image_bytes[:6] in (b"GIF87a", b"GIF89a"):
-        return "image/gif", "gif"
-
-    return "image/jpeg", "jpg"
+# Note: strip_data_url_prefix, get_image_dimensions, and detect_mime_type_with_extension
+# are imported from gamegame.utils.image
 
 
 async def _load_existing_attachments(session: Any, resource_id: str) -> dict[str, Attachment]:
@@ -531,8 +555,7 @@ async def _cleanup_orphaned_attachments(
     return deleted_count
 
 
-# Batch size for vision stage checkpointing
-VISION_BATCH_SIZE = 15
+# Vision batch size is configured via settings.pipeline_vision_batch_size
 
 
 async def _stage_vision(
@@ -591,8 +614,9 @@ async def _stage_vision(
     skipped_count = 0
 
     # Process images in batches
-    for batch_start in range(resume_from, len(images), VISION_BATCH_SIZE):
-        batch_end = min(batch_start + VISION_BATCH_SIZE, len(images))
+    batch_size = settings.pipeline_vision_batch_size
+    for batch_start in range(resume_from, len(images), batch_size):
+        batch_end = min(batch_start + batch_size, len(images))
         batch_images = images[batch_start:batch_end]
 
         logger.info(
@@ -633,8 +657,15 @@ async def _stage_vision(
 
         # Create attachments for this batch
         for img, analysis in zip(batch_images, batch_results, strict=True):
+            original_id = img["id"]
+
+            # Skip bad quality images entirely - don't create attachments for them
+            if analysis.quality.value != "good":
+                skipped_count += 1
+                continue
+
             # Decode base64 image data
-            base64_data = _strip_data_url_prefix(img["base64"])
+            base64_data = strip_data_url_prefix(img["base64"])
             image_bytes = base64.b64decode(base64_data)
 
             # Compute content hash
@@ -654,12 +685,12 @@ async def _stage_vision(
                 attachment.is_relevant = analysis.relevant
                 attachment.ocr_text = analysis.ocr_text
                 if not attachment.width or not attachment.height:
-                    attachment.width, attachment.height = _get_image_dimensions(image_bytes)
+                    attachment.width, attachment.height = get_image_dimensions(image_bytes)
                 reused_count += 1
             else:
                 # New image
-                mime_type, extension = _detect_image_mime_type(image_bytes)
-                width, height = _get_image_dimensions(image_bytes)
+                mime_type, extension = detect_mime_type_with_extension(image_bytes)
+                width, height = get_image_dimensions(image_bytes)
 
                 prefix = f"resources/{resource.id}/attachments"
                 url, blob_key = await storage.upload_file(
@@ -690,11 +721,7 @@ async def _stage_vision(
                 created_count += 1
 
             # Track mapping for markdown update
-            original_id = img["id"]
-            if analysis.quality.value == "good":
-                image_id_mapping[original_id] = attachment.id
-            else:
-                skipped_count += 1
+            image_id_mapping[original_id] = attachment.id
 
         # Checkpoint after each batch
         state["stage_cursor"] = {
@@ -726,15 +753,19 @@ async def _stage_vision(
         all_original_ids = {img["id"] for img in images}
 
         # Replace good quality image references
+        # Pattern handles nested brackets in alt text like ![Image with [note]](id)
         for original_id, attachment_id in image_id_mapping.items():
-            pattern = rf"(\!\[[^\]]*\])\({re.escape(original_id)}\)"
+            # Match ![...](original_id) where ... can contain nested brackets
+            # Uses a pattern that matches balanced brackets up to 2 levels deep
+            pattern = rf"(!\[(?:[^\[\]]|\[(?:[^\[\]]|\[[^\]]*\])*\])*\])\({re.escape(original_id)}\)"
             replacement = rf"\1(attachment://{attachment_id})"
             updated_markdown = re.sub(pattern, replacement, updated_markdown)
 
         # Remove bad quality image references
         bad_quality_ids = all_original_ids - set(image_id_mapping.keys())
         for original_id in bad_quality_ids:
-            pattern = rf"\!\[[^\]]*\]\({re.escape(original_id)}\)\n?"
+            # Same pattern for matching, then remove the entire image reference
+            pattern = rf"!\[(?:[^\[\]]|\[(?:[^\[\]]|\[[^\]]*\])*\])*\]\({re.escape(original_id)}\)\n?"
             updated_markdown = re.sub(pattern, "", updated_markdown)
 
         state["raw_markdown"] = updated_markdown
@@ -861,6 +892,34 @@ async def _stage_metadata(
     return state
 
 
+async def _cleanup_segments(session: Any, resource_id: str) -> int:
+    """Delete all existing segments for a resource.
+
+    Also clears segment references from fragments to avoid FK violations.
+    Returns number of segments deleted.
+    """
+    from sqlalchemy import update
+
+    # First, clear segment_id on fragments to avoid FK violation
+    # (fragments reference segments via segment_id)
+    clear_fragment_refs = (
+        update(Fragment)
+        .where(Fragment.resource_id == resource_id)  # type: ignore[arg-type]
+        .values(segment_id=None)
+    )
+    await session.execute(clear_fragment_refs)
+
+    # Now delete segments
+    delete_segments = delete(Segment).where(Segment.resource_id == resource_id)  # type: ignore[arg-type]
+    result = await session.execute(delete_segments)
+    deleted_count = result.rowcount
+
+    if deleted_count > 0:
+        logger.info(f"Resource {resource_id}: Deleted {deleted_count} existing segments")
+
+    return deleted_count
+
+
 async def _stage_segment(
     session: Any,
     resource: Resource,
@@ -881,9 +940,7 @@ async def _stage_segment(
         return state
 
     # Clean up existing segments (in case of reprocessing)
-    await session.execute(
-        delete(Segment).where(Segment.resource_id == resource.id)  # type: ignore[arg-type]
-    )
+    await _cleanup_segments(session, resource.id)
 
     # Create progress callback
     async def report_segment_progress(current: int, total: int) -> None:

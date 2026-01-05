@@ -9,7 +9,11 @@ from pydantic import BaseModel
 
 from gamegame.api.deps import CurrentUserOptional, SessionDep
 from gamegame.api.utils import get_game_by_id_or_slug
-from gamegame.services.chat import ChatMessage, chat, chat_stream
+from gamegame.services.chat import (
+    ChatMessage,
+    single_pass_chat,
+    single_pass_chat_stream,
+)
 from gamegame.services.rate_limit import (
     RateLimitType,
     check_rate_limit,
@@ -98,11 +102,11 @@ async def chat_with_game(
         ChatMessage(role=m.role, content=m.content) for m in request.messages
     ]
 
-    # Handle streaming
+    # Handle streaming (using single-pass RAG for speed)
     if request.stream:
         async def generate():
             try:
-                async for token in chat_stream(session, game, messages):
+                async for token in single_pass_chat_stream(session, game, messages):
                     yield f"data: {token}\n\n"
                 yield "data: [DONE]\n\n"
             except Exception:
@@ -121,9 +125,9 @@ async def chat_with_game(
             },
         )
 
-    # Non-streaming response
+    # Non-streaming response (using single-pass RAG for speed)
     try:
-        response = await chat(session, game, messages)
+        response = await single_pass_chat(session, game, messages)
     except CircuitOpenError:
         logger.warning(f"Circuit breaker open for chat request on game {game.id}")
         raise HTTPException(

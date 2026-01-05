@@ -122,8 +122,9 @@ async def analyze_attachment(
             # Catch any unexpected errors
             error = f"Unexpected error: {e}"
             logger.exception(f"Unexpected error analyzing attachment {attachment_id}")
-            await fail_workflow_run(session, run_id, error, "UNEXPECTED_ERROR")
-            await session.commit()
+            await session.rollback()
+            async with session.begin():
+                await fail_workflow_run(session, run_id, error, "UNEXPECTED_ERROR")
             return {"success": False, "error": error}
 
 

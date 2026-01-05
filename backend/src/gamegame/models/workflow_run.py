@@ -13,9 +13,10 @@ from gamegame.models.base import TimestampMixin, generate_nanoid
 # Stage metadata - single source of truth
 STAGE_METADATA: dict[str, tuple[int, str]] = {
     "ingest": (15, "Extracting PDF"),
-    "vision": (35, "Analyzing images"),
-    "cleanup": (50, "Cleaning content"),
-    "metadata": (60, "Generating metadata"),
+    "vision": (30, "Analyzing images"),
+    "cleanup": (45, "Cleaning content"),
+    "metadata": (55, "Generating metadata"),
+    "segment": (65, "Extracting segments"),
     "embed": (85, "Creating embeddings"),
     "finalize": (95, "Finalizing"),
 }
@@ -67,10 +68,16 @@ class WorkflowRun(TimestampMixin, SQLModel, table=True):
     error: str | None = Field(default=None)
     error_code: str | None = Field(default=None, max_length=50)
 
-    # Related entities
-    resource_id: str | None = Field(default=None, foreign_key="resources.id", index=True, max_length=21)
-    attachment_id: str | None = Field(default=None, foreign_key="attachments.id", index=True, max_length=21)
-    game_id: str | None = Field(default=None, foreign_key="games.id", index=True, max_length=21)
+    # Related entities (SET NULL on delete - keep workflow history for auditing)
+    resource_id: str | None = Field(
+        default=None, foreign_key="resources.id", index=True, max_length=21, ondelete="SET NULL"
+    )
+    attachment_id: str | None = Field(
+        default=None, foreign_key="attachments.id", index=True, max_length=21, ondelete="SET NULL"
+    )
+    game_id: str | None = Field(
+        default=None, foreign_key="games.id", index=True, max_length=21, ondelete="SET NULL"
+    )
 
     # Extra metadata
     extra_data: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))

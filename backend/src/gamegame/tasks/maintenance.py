@@ -8,6 +8,7 @@ from sqlmodel import delete, select
 
 from gamegame.database import get_session_context
 from gamegame.models import Attachment, Resource
+from gamegame.models.bgg_game import BGGGame
 from gamegame.models.workflow_run import WorkflowRun
 from gamegame.services.storage import storage
 from gamegame.services.workflow_tracking import (
@@ -26,6 +27,9 @@ MAINTENANCE_TIMEOUT_SECONDS = 10 * 60
 
 # Default retention for workflow runs (30 days)
 WORKFLOW_RUN_RETENTION_DAYS = 30
+
+# Default retention for BGG cache (30 days)
+BGG_CACHE_RETENTION_DAYS = 30
 
 
 async def cleanup_orphaned_blobs(
@@ -126,8 +130,9 @@ async def cleanup_orphaned_blobs(
         except Exception as e:
             error = f"Blob cleanup failed: {e}"
             logger.exception(error)
-            await fail_workflow_run(session, run_id, error, "CLEANUP_ERROR")
-            await session.commit()
+            await session.rollback()
+            async with session.begin():
+                await fail_workflow_run(session, run_id, error, "CLEANUP_ERROR")
             return {"success": False, "error": error}
 
 
@@ -213,8 +218,9 @@ async def prune_workflow_runs(
         except Exception as e:
             error = f"Workflow run prune failed: {e}"
             logger.exception(error)
-            await fail_workflow_run(session, run_id, error, "PRUNE_ERROR")
-            await session.commit()
+            await session.rollback()
+            async with session.begin():
+                await fail_workflow_run(session, run_id, error, "PRUNE_ERROR")
             return {"success": False, "error": error}
 
 
@@ -311,6 +317,10 @@ async def recover_stalled_workflows(
                                 retry_count=(workflow.extra_data or {}).get("retry_count", 0) + 1,
                             )
 
+                            # Update the resource to point to the new workflow run
+                            # This ensures stall detection tracks the new job
+                            resource.current_run_id = new_key
+
                             # Update the old workflow run to indicate it was resumed
                             workflow.status = "cancelled"
                             workflow.completed_at = datetime.now(UTC)
@@ -402,8 +412,87 @@ async def recover_stalled_workflows(
         except Exception as e:
             error = f"Stalled workflow recovery failed: {e}"
             logger.exception(error)
-            await fail_workflow_run(session, run_id, error, "RECOVERY_ERROR")
+            await session.rollback()
+            async with session.begin():
+                await fail_workflow_run(session, run_id, error, "RECOVERY_ERROR")
+            return {"success": False, "error": error}
+
+
+async def cleanup_bgg_cache(
+    ctx: dict[str, Any],
+    retention_days: int = BGG_CACHE_RETENTION_DAYS,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Delete stale BGG game cache entries.
+
+    BGG cache entries that haven't been refreshed in retention_days are
+    considered stale and can be safely deleted. Games that are actively
+    used will be re-fetched from BGG as needed.
+
+    Args:
+        ctx: SAQ context
+        retention_days: Keep entries newer than this many days
+        dry_run: If True, only report what would be deleted
+
+    Returns:
+        Dict with cleanup results
+    """
+    job = ctx.get("job")
+    run_id = job.key if job else f"local-bgg-cleanup-{datetime.now(UTC).isoformat()}"
+
+    async with get_session_context() as session:
+        # Create workflow run record
+        await get_or_create_workflow_run(
+            session,
+            run_id=run_id,
+            workflow_name="cleanup_bgg_cache",
+            input_data={"retention_days": retention_days, "dry_run": dry_run},
+        )
+        await start_workflow_run(session, run_id)
+        await session.commit()
+
+        try:
+            # Calculate cutoff timestamp in milliseconds
+            cutoff_date = datetime.now(UTC) - timedelta(days=retention_days)
+            cutoff_ms = int(cutoff_date.timestamp() * 1000)
+
+            # Count entries that would be deleted
+            count_stmt = select(BGGGame).where(BGGGame.cached_at < cutoff_ms)  # type: ignore[arg-type]
+            count_result = await session.execute(count_stmt)
+            stale_entries = list(count_result.scalars())
+            delete_count = len(stale_entries)
+
+            logger.info(f"Found {delete_count} BGG cache entries older than {retention_days} days")
+
+            # Delete if not dry run
+            if not dry_run and delete_count > 0:
+                delete_stmt = delete(BGGGame).where(BGGGame.cached_at < cutoff_ms)  # type: ignore[arg-type]
+                await session.execute(delete_stmt)
+
+            output_data = {
+                "dry_run": dry_run,
+                "retention_days": retention_days,
+                "cutoff_date": cutoff_date.isoformat(),
+                "entries_deleted": delete_count if not dry_run else 0,
+                "entries_would_delete": delete_count,
+            }
+
+            await complete_workflow_run(session, run_id, output_data)
             await session.commit()
+
+            logger.info(
+                f"BGG cache cleanup complete: {delete_count} entries "
+                f"{'would be' if dry_run else ''} deleted"
+            )
+
+            return {"success": True, **output_data}
+
+        except Exception as e:
+            error = f"BGG cache cleanup failed: {e}"
+            logger.exception(error)
+            await session.rollback()
+            async with session.begin():
+                await fail_workflow_run(session, run_id, error, "BGG_CLEANUP_ERROR")
             return {"success": False, "error": error}
 
 
@@ -411,3 +500,4 @@ async def recover_stalled_workflows(
 cleanup_orphaned_blobs.timeout = MAINTENANCE_TIMEOUT_SECONDS  # type: ignore[attr-defined]
 prune_workflow_runs.timeout = MAINTENANCE_TIMEOUT_SECONDS  # type: ignore[attr-defined]
 recover_stalled_workflows.timeout = MAINTENANCE_TIMEOUT_SECONDS  # type: ignore[attr-defined]
+cleanup_bgg_cache.timeout = MAINTENANCE_TIMEOUT_SECONDS  # type: ignore[attr-defined]

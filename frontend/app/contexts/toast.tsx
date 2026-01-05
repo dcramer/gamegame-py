@@ -244,7 +244,10 @@ export function ToastContextProvider({ children }: { children: ReactNode }) {
                         variant="outline"
                         size="sm"
                         className="h-6 px-2 text-xs border-current/30 bg-transparent hover:bg-white/10"
-                        onClick={action.onClick}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          action.onClick();
+                        }}
                       >
                         {action.label}
                       </Button>

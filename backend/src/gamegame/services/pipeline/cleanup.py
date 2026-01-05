@@ -35,9 +35,14 @@ Fix:
 - OCR errors and typos
 - Inconsistent formatting
 - Broken tables (convert to proper markdown tables)
-- Remove artifacts like page numbers, headers/footers
 - Fix heading hierarchy (use proper # levels)
 - Clean up list formatting
+
+Remove these OCR artifacts (they are NOT game content):
+- Standalone page numbers on their own line
+- Garbled header/footer text at page boundaries (often 1-3 uppercase words that don't fit the surrounding context)
+- Corrupted text fragments from misread page decorations
+- Repeated watermarks or publisher marks
 
 Preserve:
 - All game rules and content

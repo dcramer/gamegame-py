@@ -1,4 +1,4 @@
-import { Check, FileText, Image, Loader2, Search, Sparkles, Tag } from "lucide-react";
+import { Check, FileText, Image, Layers, Loader2, Search, Sparkles, Tag } from "lucide-react";
 import type { ProcessingStage, ResourceStatus } from "~/api/types";
 import { cn } from "~/lib/utils";
 
@@ -13,12 +13,13 @@ const STAGES: Array<{
   label: string;
   icon: React.ComponentType<{ className?: string }>;
 }> = [
-  { id: "ingest", label: "Extract", icon: FileText },
-  { id: "vision", label: "Analyze", icon: Image },
+  { id: "ingest", label: "Ingest", icon: FileText },
+  { id: "vision", label: "Vision", icon: Image },
   { id: "cleanup", label: "Clean", icon: Sparkles },
-  { id: "metadata", label: "Metadata", icon: Tag },
-  { id: "embed", label: "Index", icon: Search },
-  { id: "finalize", label: "Complete", icon: Check },
+  { id: "metadata", label: "Meta", icon: Tag },
+  { id: "segment", label: "Segment", icon: Layers },
+  { id: "embed", label: "Embed", icon: Search },
+  { id: "finalize", label: "Done", icon: Check },
 ];
 
 function getStageStatus(
@@ -61,18 +62,18 @@ function getStageStatus(
 
 export function ProcessingTimeline({ currentStage, status, className }: ProcessingTimelineProps) {
   return (
-    <div className={cn("flex items-center justify-between gap-2", className)}>
+    <div className={cn("flex items-center justify-between gap-1", className)}>
       {STAGES.map((stage, index) => {
         const stageStatus = getStageStatus(stage.id, currentStage, status);
         const Icon = stage.icon;
         const isLast = index === STAGES.length - 1;
 
         return (
-          <div key={stage.id} className="flex items-center flex-1">
-            <div className="flex flex-col items-center">
+          <div key={stage.id} className="flex items-center flex-1 min-w-0">
+            <div className="flex flex-col items-center min-w-0">
               <div
                 className={cn(
-                  "flex h-8 w-8 items-center justify-center rounded-full border-2 transition-colors",
+                  "flex h-6 w-6 items-center justify-center rounded-full border-2 transition-colors shrink-0",
                   stageStatus === "completed" && "border-green-500 bg-green-500 text-white",
                   stageStatus === "current" && "border-blue-500 bg-blue-500 text-white",
                   stageStatus === "error" && "border-red-500 bg-red-500 text-white",
@@ -81,16 +82,16 @@ export function ProcessingTimeline({ currentStage, status, className }: Processi
                 )}
               >
                 {stageStatus === "current" ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <Loader2 className="h-3 w-3 animate-spin" />
                 ) : stageStatus === "completed" ? (
-                  <Check className="h-4 w-4" />
+                  <Check className="h-3 w-3" />
                 ) : (
-                  <Icon className="h-4 w-4" />
+                  <Icon className="h-3 w-3" />
                 )}
               </div>
               <span
                 className={cn(
-                  "mt-1 text-xs font-medium",
+                  "mt-1 text-[10px] font-medium truncate max-w-full hidden sm:block",
                   stageStatus === "completed" && "text-green-500",
                   stageStatus === "current" && "text-blue-500",
                   stageStatus === "error" && "text-red-500",
@@ -103,7 +104,7 @@ export function ProcessingTimeline({ currentStage, status, className }: Processi
             {!isLast && (
               <div
                 className={cn(
-                  "flex-1 h-0.5 mx-2",
+                  "flex-1 h-0.5 mx-1",
                   stageStatus === "completed" && "bg-green-500",
                   stageStatus === "current" && "bg-blue-500",
                   stageStatus === "error" && "bg-red-500",

@@ -149,6 +149,9 @@ async def complete_workflow_run(
             workflow_run.output_data = output_data
         await session.flush()
 
+    # Clear progress cache to prevent memory leak
+    clear_item_progress_cache(run_id)
+
     return workflow_run
 
 
@@ -198,6 +201,9 @@ async def fail_workflow_run(
             f"Workflow {run_id} failed: {error_code or 'ERROR'} - {error}",
             extra={"run_id": run_id, "error_code": error_code},
         )
+
+    # Clear progress cache to prevent memory leak
+    clear_item_progress_cache(run_id)
 
     return workflow_run
 

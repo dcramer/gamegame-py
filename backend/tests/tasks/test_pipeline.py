@@ -101,47 +101,47 @@ class TestDataUrlStripping:
 
     def test_strips_jpeg_data_url(self):
         """Strips data:image/jpeg;base64, prefix."""
-        from gamegame.tasks.pipeline import _strip_data_url_prefix
+        from gamegame.utils.image import strip_data_url_prefix
 
         data_url = "data:image/jpeg;base64,/9j/4AAQSkZJRg=="
-        result = _strip_data_url_prefix(data_url)
+        result = strip_data_url_prefix(data_url)
         assert result == "/9j/4AAQSkZJRg=="
 
     def test_strips_png_data_url(self):
         """Strips data:image/png;base64, prefix."""
-        from gamegame.tasks.pipeline import _strip_data_url_prefix
+        from gamegame.utils.image import strip_data_url_prefix
 
         data_url = "data:image/png;base64,iVBORw0KGgo="
-        result = _strip_data_url_prefix(data_url)
+        result = strip_data_url_prefix(data_url)
         assert result == "iVBORw0KGgo="
 
     def test_preserves_plain_base64(self):
         """Leaves plain base64 unchanged."""
-        from gamegame.tasks.pipeline import _strip_data_url_prefix
+        from gamegame.utils.image import strip_data_url_prefix
 
         plain_b64 = "/9j/4AAQSkZJRg=="
-        result = _strip_data_url_prefix(plain_b64)
+        result = strip_data_url_prefix(plain_b64)
         assert result == "/9j/4AAQSkZJRg=="
 
     def test_handles_data_url_with_charset(self):
         """Handles data URLs with extra parameters."""
-        from gamegame.tasks.pipeline import _strip_data_url_prefix
+        from gamegame.utils.image import strip_data_url_prefix
 
         data_url = "data:image/png;charset=utf-8;base64,iVBORw0KGgo="
-        result = _strip_data_url_prefix(data_url)
+        result = strip_data_url_prefix(data_url)
         assert result == "iVBORw0KGgo="
 
     def test_decodes_correctly_after_stripping(self):
         """Verify base64 decodes to valid image bytes after stripping."""
         import base64
 
-        from gamegame.tasks.pipeline import _strip_data_url_prefix
+        from gamegame.utils.image import strip_data_url_prefix
 
         # Real JPEG header in base64
         jpeg_header_b64 = "/9j/4AAQSkZJRgABAQAAAQABAAD/"
         data_url = f"data:image/jpeg;base64,{jpeg_header_b64}"
 
-        stripped = _strip_data_url_prefix(data_url)
+        stripped = strip_data_url_prefix(data_url)
         decoded = base64.b64decode(stripped)
 
         # Should start with JPEG magic bytes
@@ -244,68 +244,139 @@ More text.
         assert surrounding is None
 
 
+class TestImageReferencePatterns:
+    """Tests for image reference replacement patterns."""
+
+    def test_simple_alt_text(self):
+        """Matches simple alt text without brackets."""
+        import re
+
+        original_id = "img_001"
+        pattern = rf"(!\[(?:[^\[\]]|\[(?:[^\[\]]|\[[^\]]*\])*\])*\])\({re.escape(original_id)}\)"
+
+        markdown = "![Simple alt text](img_001)"
+        match = re.search(pattern, markdown)
+
+        assert match is not None
+        assert match.group(1) == "![Simple alt text]"
+
+    def test_alt_text_with_brackets(self):
+        """Matches alt text containing brackets."""
+        import re
+
+        original_id = "img_002"
+        pattern = rf"(!\[(?:[^\[\]]|\[(?:[^\[\]]|\[[^\]]*\])*\])*\])\({re.escape(original_id)}\)"
+
+        markdown = "![Image with [note] inside](img_002)"
+        match = re.search(pattern, markdown)
+
+        assert match is not None
+        assert match.group(1) == "![Image with [note] inside]"
+
+    def test_alt_text_with_nested_brackets(self):
+        """Matches alt text with nested brackets."""
+        import re
+
+        original_id = "img_003"
+        pattern = rf"(!\[(?:[^\[\]]|\[(?:[^\[\]]|\[[^\]]*\])*\])*\])\({re.escape(original_id)}\)"
+
+        markdown = "![Diagram [see [page 5]]](img_003)"
+        match = re.search(pattern, markdown)
+
+        assert match is not None
+        assert match.group(1) == "![Diagram [see [page 5]]]"
+
+    def test_replacement_preserves_alt_text(self):
+        """Full replacement preserves alt text."""
+        import re
+
+        original_id = "img_001"
+        attachment_id = "att_xyz"
+        pattern = rf"(!\[(?:[^\[\]]|\[(?:[^\[\]]|\[[^\]]*\])*\])*\])\({re.escape(original_id)}\)"
+        replacement = rf"\1(attachment://{attachment_id})"
+
+        markdown = "![Game board [setup]](img_001)"
+        result = re.sub(pattern, replacement, markdown)
+
+        assert result == "![Game board [setup]](attachment://att_xyz)"
+
+    def test_removal_pattern(self):
+        """Removal pattern works with brackets in alt text."""
+        import re
+
+        original_id = "img_bad"
+        pattern = rf"!\[(?:[^\[\]]|\[(?:[^\[\]]|\[[^\]]*\])*\])*\]\({re.escape(original_id)}\)\n?"
+
+        markdown = "Some text\n![Bad [quality] image](img_bad)\nMore text"
+        result = re.sub(pattern, "", markdown)
+
+        assert "img_bad" not in result
+        assert "Some text" in result
+        assert "More text" in result
+
+
 class TestImageAnalysis:
     """Tests for image analysis functions."""
 
     def test_detect_mime_type_png(self):
         """Detects PNG format from magic bytes."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+        from gamegame.utils.image import detect_mime_type
 
         png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
-        assert _detect_mime_type(png_bytes) == "image/png"
+        assert detect_mime_type(png_bytes) == "image/png"
 
     def test_detect_mime_type_jpeg(self):
         """Detects JPEG format from magic bytes."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+        from gamegame.utils.image import detect_mime_type
 
         jpeg_bytes = b"\xff\xd8\xff" + b"\x00" * 100
-        assert _detect_mime_type(jpeg_bytes) == "image/jpeg"
+        assert detect_mime_type(jpeg_bytes) == "image/jpeg"
 
     def test_detect_mime_type_gif(self):
         """Detects GIF format from magic bytes."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+        from gamegame.utils.image import detect_mime_type
 
         gif87_bytes = b"GIF87a" + b"\x00" * 100
         gif89_bytes = b"GIF89a" + b"\x00" * 100
-        assert _detect_mime_type(gif87_bytes) == "image/gif"
-        assert _detect_mime_type(gif89_bytes) == "image/gif"
+        assert detect_mime_type(gif87_bytes) == "image/gif"
+        assert detect_mime_type(gif89_bytes) == "image/gif"
 
     def test_detect_mime_type_webp(self):
         """Detects WebP format from magic bytes."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+        from gamegame.utils.image import detect_mime_type
 
         webp_bytes = b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 100
-        assert _detect_mime_type(webp_bytes) == "image/webp"
+        assert detect_mime_type(webp_bytes) == "image/webp"
 
     def test_detect_mime_type_tiff(self):
         """Detects TIFF format (unsupported by OpenAI)."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+        from gamegame.utils.image import detect_mime_type
 
         tiff_le_bytes = b"II\x2a\x00" + b"\x00" * 100  # Little-endian
         tiff_be_bytes = b"MM\x00\x2a" + b"\x00" * 100  # Big-endian
-        assert _detect_mime_type(tiff_le_bytes) == "image/tiff"
-        assert _detect_mime_type(tiff_be_bytes) == "image/tiff"
+        assert detect_mime_type(tiff_le_bytes) == "image/tiff"
+        assert detect_mime_type(tiff_be_bytes) == "image/tiff"
 
     def test_detect_mime_type_bmp(self):
         """Detects BMP format (unsupported by OpenAI)."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+        from gamegame.utils.image import detect_mime_type
 
         bmp_bytes = b"BM" + b"\x00" * 100
-        assert _detect_mime_type(bmp_bytes) == "image/bmp"
+        assert detect_mime_type(bmp_bytes) == "image/bmp"
 
     def test_detect_mime_type_unknown(self):
         """Returns octet-stream for unknown formats."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+        from gamegame.utils.image import detect_mime_type
 
         unknown_bytes = b"UNKNOWN_FORMAT" + b"\x00" * 100
-        assert _detect_mime_type(unknown_bytes) == "application/octet-stream"
+        assert detect_mime_type(unknown_bytes) == "application/octet-stream"
 
     def test_detect_mime_type_short_data(self):
         """Short data returns application/octet-stream."""
-        from gamegame.services.pipeline.vision import _detect_mime_type
+        from gamegame.utils.image import detect_mime_type
 
         short_bytes = b"\x00\x00"
-        assert _detect_mime_type(short_bytes) == "application/octet-stream"
+        assert detect_mime_type(short_bytes) == "application/octet-stream"
 
     @pytest.mark.asyncio
     async def test_analyze_single_image_rejects_unsupported_format(self):
@@ -1014,8 +1085,10 @@ class TestPipelineStageIntegration:
         assert resource.description == "Complete game rules."
 
     @pytest.mark.asyncio
-    async def test_metadata_stage_updates_name_from_cleaned_filename(self, session):
-        """Metadata stage updates name even when it was derived from filename."""
+    async def test_metadata_stage_updates_and_persists_name(self, session):
+        """Metadata stage replaces filename-derived name with LLM-generated name and persists it."""
+        from sqlmodel import select
+
         from gamegame.tasks.pipeline import _stage_metadata
 
         game = Game(name="Name Update Test", slug="name-update-test")
@@ -1035,6 +1108,8 @@ class TestPipelineStageIntegration:
         session.add(resource)
         await session.commit()
 
+        resource_id = resource.id
+
         state = {"cleaned_markdown": "# Scythe Rules\n\nGame content here."}
 
         with patch("gamegame.services.pipeline.metadata.create_chat_completion") as mock_chat:
@@ -1048,9 +1123,21 @@ class TestPipelineStageIntegration:
                 mock_settings.openai_api_key = "test-key"
                 await _stage_metadata(session, resource, state)
 
-        # LLM-generated name should always be applied
+        # In-memory update should be applied
         assert resource.name == "Scythe Rulebook"
         assert resource.description == "Complete rules for Scythe."
+
+        # Commit like the pipeline does after each stage
+        await session.commit()
+
+        # Verify persistence by re-fetching from database
+        session.expire(resource)
+        stmt = select(Resource).where(Resource.id == resource_id)
+        result = await session.execute(stmt)
+        fetched_resource = result.scalar_one()
+
+        assert fetched_resource.name == "Scythe Rulebook"
+        assert fetched_resource.description == "Complete rules for Scythe."
 
 
 class TestResumableJobs:
@@ -1098,6 +1185,10 @@ class TestResumableJobs:
 
             with patch("gamegame.services.pipeline.embed.settings") as mock_settings:
                 mock_settings.openai_api_key = "test-key"
+                # Provide pipeline chunking settings for chunk_text_simple
+                mock_settings.pipeline_max_chunk_size = 2500
+                mock_settings.pipeline_chunk_overlap = 200
+                mock_settings.pipeline_min_chunk_size = 100
 
                 # Test content that will create ~2 chunks
                 markdown = "Paragraph one with enough content. " * 20 + "\n\n"
@@ -1115,7 +1206,6 @@ class TestResumableJobs:
                     game_id=game.id,
                     markdown=markdown,
                     generate_hyde=False,
-                    classify_answer_types=False,
                     on_checkpoint=track_checkpoint,
                     resume_from=0,  # Start fresh for this test
                 )

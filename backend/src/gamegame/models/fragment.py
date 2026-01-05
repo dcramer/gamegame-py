@@ -3,12 +3,10 @@
 from enum import Enum
 from typing import Any
 
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, Index, text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlmodel import Field, SQLModel
 
-from gamegame.config import settings
 from gamegame.models.base import TimestampMixin, generate_nanoid
 
 
@@ -35,6 +33,16 @@ class Fragment(TimestampMixin, SQLModel, table=True):
     # Enriched searchable content (includes context, resource info)
     searchable_content: str | None = Field(default=None, description="Enriched content for embedding")
 
+    # Segment linkage for parent document retrieval
+    segment_id: str | None = Field(
+        default=None,
+        foreign_key="segments.id",
+        index=True,
+        max_length=21,
+        ondelete="SET NULL",
+        description="Parent segment for context expansion",
+    )
+
     # Location info
     page_number: int | None = Field(default=None)
     page_range: list[int] | None = Field(
@@ -45,17 +53,12 @@ class Fragment(TimestampMixin, SQLModel, table=True):
     section: str | None = Field(default=None, max_length=255)
 
     # Associated attachment (for image fragments)
-    attachment_id: str | None = Field(default=None, foreign_key="attachments.id", max_length=21)
-
-    # Denormalized resource info for search enrichment
-    resource_name: str | None = Field(default=None, max_length=255)
-    resource_description: str | None = Field(default=None)
-    resource_type: str | None = Field(default=None, max_length=50)
-
-    # Vector embedding for semantic search (NOT NULL, matches TypeScript)
-    embedding: list[float] = Field(
-        sa_column=Column(Vector(settings.embedding_dimensions), nullable=False),
+    attachment_id: str | None = Field(
+        default=None, foreign_key="attachments.id", max_length=21, ondelete="SET NULL"
     )
+
+    # Note: Embeddings are stored in the separate 'embeddings' table
+    # This allows for multiple embeddings per fragment (content + HyDE questions)
 
     # Full-text search vector
     search_vector: Any | None = Field(
@@ -85,16 +88,6 @@ class Fragment(TimestampMixin, SQLModel, table=True):
     version: int = Field(default=0, description="Embedding/index version")
 
     __table_args__ = (
-        # HNSW index for vector similarity search using inner product
-        # OpenAI embeddings are normalized, so inner product = cosine similarity
-        # but inner product is faster to compute
-        Index(
-            "fragment_embedding_idx",
-            "embedding",
-            postgresql_using="hnsw",
-            postgresql_with={"m": 16, "ef_construction": 64},
-            postgresql_ops={"embedding": "vector_ip_ops"},
-        ),
         # GIN index for full-text search
         Index(
             "fragment_search_vector_idx",

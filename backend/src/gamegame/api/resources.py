@@ -49,6 +49,41 @@ def resource_to_read(
     )
 
 
+async def get_resource_with_counts(
+    session: SessionDep, resource_id: str
+) -> tuple[Resource, int, int] | None:
+    """Get a resource with segment and fragment counts in a single query.
+
+    Returns (resource, segment_count, fragment_count) or None if not found.
+    """
+    segment_count_subq = (
+        select(func.count(1))
+        .where(Segment.resource_id == resource_id)
+        .correlate(Resource)
+        .scalar_subquery()
+    )
+    fragment_count_subq = (
+        select(func.count(1))
+        .where(Fragment.resource_id == resource_id)
+        .correlate(Resource)
+        .scalar_subquery()
+    )
+
+    stmt = select(
+        Resource,
+        segment_count_subq.label("segment_count"),
+        fragment_count_subq.label("fragment_count"),
+    ).where(Resource.id == resource_id)
+
+    result = await session.execute(stmt)
+    row = result.one_or_none()
+
+    if not row:
+        return None
+
+    return row.Resource, row.segment_count or 0, row.fragment_count or 0
+
+
 # Nested routes under /games/{game_id_or_slug}/resources
 game_resources_router = APIRouter()
 
@@ -181,25 +216,15 @@ async def get_resource(
     _user: CurrentUserOptional,
 ):
     """Get a resource by ID."""
-    stmt = select(Resource).where(Resource.id == resource_id)
-    result = await session.execute(stmt)
-    resource = result.scalar_one_or_none()
+    result = await get_resource_with_counts(session, resource_id)
 
-    if not resource:
+    if not result:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Resource not found",
         )
 
-    # Get segment and fragment counts
-    segment_count_stmt = select(func.count(1)).where(Segment.resource_id == resource_id)
-    segment_count_result = await session.execute(segment_count_stmt)
-    segment_count = segment_count_result.scalar() or 0
-
-    fragment_count_stmt = select(func.count(1)).where(Fragment.resource_id == resource_id)
-    fragment_count_result = await session.execute(fragment_count_stmt)
-    fragment_count = fragment_count_result.scalar() or 0
-
+    resource, segment_count, fragment_count = result
     return resource_to_read(resource, segment_count, fragment_count)
 
 
@@ -226,17 +251,16 @@ async def update_resource(
         setattr(resource, field, value)
 
     await session.commit()
-    await session.refresh(resource)
 
-    # Get segment and fragment counts
-    segment_count_stmt = select(func.count(1)).where(Segment.resource_id == resource_id)
-    segment_count_result = await session.execute(segment_count_stmt)
-    segment_count = segment_count_result.scalar() or 0
+    # Refetch with counts in one query
+    result = await get_resource_with_counts(session, resource_id)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resource not found",
+        )
 
-    fragment_count_stmt = select(func.count(1)).where(Fragment.resource_id == resource_id)
-    fragment_count_result = await session.execute(fragment_count_stmt)
-    fragment_count = fragment_count_result.scalar() or 0
-
+    resource, segment_count, fragment_count = result
     return resource_to_read(resource, segment_count, fragment_count)
 
 
@@ -324,7 +348,6 @@ async def reprocess_resource(
     # updated by the pipeline as it progresses
 
     await session.commit()
-    await session.refresh(resource)
 
     # Enqueue processing task
     await queue.enqueue(
@@ -334,13 +357,13 @@ async def reprocess_resource(
         timeout=PIPELINE_TIMEOUT_SECONDS,
     )
 
-    # Get segment and fragment counts
-    segment_count_stmt = select(func.count(1)).where(Segment.resource_id == resource_id)
-    segment_count_result = await session.execute(segment_count_stmt)
-    segment_count = segment_count_result.scalar() or 0
+    # Refetch with counts in one query
+    result = await get_resource_with_counts(session, resource_id)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Resource not found",
+        )
 
-    fragment_count_stmt = select(func.count(1)).where(Fragment.resource_id == resource_id)
-    fragment_count_result = await session.execute(fragment_count_stmt)
-    fragment_count = fragment_count_result.scalar() or 0
-
+    resource, segment_count, fragment_count = result
     return resource_to_read(resource, segment_count, fragment_count)

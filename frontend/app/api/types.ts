@@ -7,7 +7,14 @@
 
 export type ResourceType = "rulebook" | "expansion" | "faq" | "errata" | "reference";
 export type ResourceStatus = "ready" | "queued" | "processing" | "completed" | "failed";
-export type ProcessingStage = "ingest" | "vision" | "cleanup" | "metadata" | "embed" | "finalize";
+export type ProcessingStage =
+  | "ingest"
+  | "vision"
+  | "cleanup"
+  | "metadata"
+  | "segment"
+  | "embed"
+  | "finalize";
 export type AttachmentType = "image";
 export type DetectedType = "diagram" | "table" | "photo" | "icon" | "decorative";
 export type QualityRating = "good" | "bad";
@@ -55,6 +62,7 @@ export interface Resource {
   page_count: number | null;
   image_count: number | null;
   word_count: number | null;
+  segment_count?: number;
   fragment_count?: number;
 }
 
@@ -87,6 +95,22 @@ export interface Fragment {
   page_number: number | null;
   section: string | null;
   attachment_id: string | null;
+}
+
+export interface Segment {
+  id: string;
+  resource_id: string;
+  game_id: string;
+  title: string;
+  hierarchy_path: string;
+  level: number;
+  order_index: number;
+  content: string;
+  page_start: number | null;
+  page_end: number | null;
+  word_count: number | null;
+  char_count: number | null;
+  parent_id: string | null;
 }
 
 export interface WorkflowRun {

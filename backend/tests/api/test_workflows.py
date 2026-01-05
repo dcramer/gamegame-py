@@ -189,6 +189,40 @@ async def test_retry_workflow_success(admin_client: AuthenticatedClient, session
 
 
 @pytest.mark.asyncio
+async def test_retry_workflow_resumes_from_last_stage(
+    admin_client: AuthenticatedClient, session, processing_resource
+):
+    """Test that retry uses last_stage from extra_data as start_stage."""
+    # Create failed workflow with last_stage in extra_data
+    failed_workflow = WorkflowRun(
+        run_id="failed-run-456",
+        workflow_name="process_resource",
+        status=WorkflowStatus.FAILED,
+        resource_id=processing_resource.id,
+        error="AI service timed out",
+        extra_data={"last_stage": "cleanup"},
+    )
+    session.add(failed_workflow)
+    await session.flush()
+
+    with patch("gamegame.api.workflows.enqueue", new_callable=AsyncMock) as mock_enqueue:
+        mock_enqueue.return_value = "new-run-789"
+
+        response = await admin_client.post("/api/admin/workflows/failed-run-456/retry")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["run_id"] == "new-run-789"
+        assert "cleanup" in data["message"]  # Message should mention the stage
+
+        # Verify enqueue was called with start_stage
+        mock_enqueue.assert_called_once()
+        call_kwargs = mock_enqueue.call_args.kwargs
+        assert call_kwargs["start_stage"] == "cleanup"
+        assert call_kwargs["retry_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_cancel_workflow_requires_admin(authenticated_client: AuthenticatedClient):
     """Test that cancelling workflow requires admin."""
     response = await authenticated_client.delete("/api/admin/workflows/test-run")

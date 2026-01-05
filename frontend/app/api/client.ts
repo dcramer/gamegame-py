@@ -18,6 +18,7 @@ import type {
   Resource,
   ResourceUpdate,
   SearchResponse,
+  Segment,
   TokenResponse,
   User,
   WorkflowRun,
@@ -435,6 +436,21 @@ export const api = {
       }>(`/attachments/${id}/reprocess`, {
         method: "POST",
       }),
+  },
+
+  // ============================================================================
+  // Segments
+  // ============================================================================
+  segments: {
+    get: (id: string) => request<Segment>(`/segments/${id}`),
+
+    listByResource: (resourceId: string, options?: { limit?: number; offset?: number }) => {
+      const params = new URLSearchParams();
+      if (options?.limit) params.set("limit", options.limit.toString());
+      if (options?.offset) params.set("offset", options.offset.toString());
+      const query = params.toString() ? `?${params}` : "";
+      return request<Segment[]>(`/segments/by-resource/${resourceId}${query}`);
+    },
   },
 
   // ============================================================================

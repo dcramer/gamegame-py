@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     openai_chat_model_dev: str = Field(
         default="gpt-4o-mini", description="OpenAI chat model for development"
     )
-    openai_timeout: float = Field(default=60.0, description="OpenAI API timeout in seconds")
+    openai_timeout: float = Field(default=300.0, description="OpenAI API timeout in seconds")
 
     # Mistral
     mistral_api_key: str = Field(default="", description="Mistral API key for PDF extraction")
@@ -111,6 +111,35 @@ class Settings(BaseSettings):
     # Embedding config
     embedding_dimensions: int = Field(default=1536, description="Embedding vector dimensions")
     embedding_batch_size: int = Field(default=100, description="Batch size for embedding")
+
+    # Pipeline processing config
+    pipeline_vision_batch_size: int = Field(
+        default=15, description="Number of images to process per vision batch"
+    )
+    pipeline_max_chunk_size: int = Field(
+        default=2500, description="Maximum chunk size in characters for embedding"
+    )
+    pipeline_chunk_overlap: int = Field(
+        default=200, description="Character overlap between chunks"
+    )
+    pipeline_min_chunk_size: int = Field(
+        default=100, description="Minimum chunk size in characters"
+    )
+    pipeline_segment_max_chars: int = Field(
+        default=80_000, description="Maximum characters per segment extraction batch"
+    )
+    pipeline_segment_overlap_lines: int = Field(
+        default=50, description="Line overlap for segment extraction batches"
+    )
+    pipeline_metadata_max_length: int = Field(
+        default=12_000, description="Maximum content length for metadata extraction"
+    )
+    pipeline_cleanup_timeout: float = Field(
+        default=600.0, description="Timeout for cleanup stage in seconds"
+    )
+    pipeline_stall_threshold: int = Field(
+        default=45 * 60, description="Seconds before a workflow is considered stalled"
+    )
 
     @computed_field  # type: ignore[prop-decorator]
     @property

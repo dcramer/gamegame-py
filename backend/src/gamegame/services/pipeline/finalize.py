@@ -18,6 +18,8 @@ async def finalize_resource(
 ) -> Resource:
     """Mark a resource as completed after processing.
 
+    Note: Does NOT commit - caller is responsible for transaction management.
+
     Args:
         session: Database session
         resource_id: Resource ID to finalize
@@ -26,7 +28,7 @@ async def finalize_resource(
         image_count: Image count (optional update)
 
     Returns:
-        Updated Resource
+        Updated Resource (not yet committed)
     """
     stmt = select(Resource).where(Resource.id == resource_id)
     result = await session.execute(stmt)
@@ -34,9 +36,11 @@ async def finalize_resource(
 
     # Update status and timestamp
     resource.status = ResourceStatus.COMPLETED
-    resource.processed_at = datetime.now(UTC).isoformat()
+    resource.processed_at = datetime.now(UTC)
     resource.processing_stage = None
     resource.error_message = None
+    # Clear processing metadata to free storage (state is no longer needed)
+    resource.processing_metadata = None
 
     # Update counts if provided
     if page_count is not None:
@@ -45,9 +49,6 @@ async def finalize_resource(
         resource.word_count = word_count
     if image_count is not None:
         resource.image_count = image_count
-
-    await session.commit()
-    await session.refresh(resource)
 
     return resource
 
@@ -59,13 +60,15 @@ async def mark_resource_failed(
 ) -> Resource:
     """Mark a resource as failed.
 
+    Note: Does NOT commit - caller is responsible for transaction management.
+
     Args:
         session: Database session
         resource_id: Resource ID
         error_message: Error description
 
     Returns:
-        Updated Resource
+        Updated Resource (not yet committed)
     """
     stmt = select(Resource).where(Resource.id == resource_id)
     result = await session.execute(stmt)
@@ -73,8 +76,5 @@ async def mark_resource_failed(
 
     resource.status = ResourceStatus.FAILED
     resource.error_message = error_message
-
-    await session.commit()
-    await session.refresh(resource)
 
     return resource

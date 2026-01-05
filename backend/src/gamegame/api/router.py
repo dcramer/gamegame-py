@@ -11,6 +11,7 @@ from gamegame.api import (
     health,
     resources,
     search,
+    segments,
     upload,
     workflows,
 )
@@ -43,6 +44,9 @@ api_router.include_router(
     prefix="/games/{game_id_or_slug}/attachments",
     tags=["attachments"],
 )
+
+# Segments
+api_router.include_router(segments.router, prefix="/segments", tags=["segments"])
 
 # Upload
 api_router.include_router(upload.router, prefix="/upload", tags=["upload"])

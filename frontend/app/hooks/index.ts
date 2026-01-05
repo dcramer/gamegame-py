@@ -25,6 +25,7 @@ export {
   useResources,
   useUpdateResource,
 } from "./useResources";
+export { useSegment, useSegmentsByResource } from "./useSegments";
 
 // UI
 export { useToast } from "./useToast";
