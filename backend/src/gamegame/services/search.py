@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gamegame.config import settings
 from gamegame.constants import ANSWER_TYPES
 from gamegame.models import Embedding, Fragment, Resource, Segment
+from gamegame.models.embedding import EmbeddingType
 from gamegame.models.model_config import get_model
 from gamegame.services.openai_client import get_openai_client
 
@@ -244,7 +245,7 @@ async def vector_search(
 
     stmt = (
         select(Embedding.fragment_id, similarity.label("score"))  # type: ignore[call-overload]
-        .where(Embedding.type == "content")
+        .where(Embedding.type == EmbeddingType.CONTENT)
     )
 
     if game_id:
@@ -271,7 +272,7 @@ async def question_vector_search(
 
     stmt = (
         select(Embedding.fragment_id, func.max(similarity).label("score"))  # type: ignore[call-overload]
-        .where(Embedding.type == "question")
+        .where(Embedding.type == EmbeddingType.QUESTION)
         .group_by(Embedding.fragment_id)
     )
 
@@ -642,6 +643,194 @@ class SegmentResult:
     page_start: int | None = None
     page_end: int | None = None
     word_count: int | None = None
+
+
+# FlashRank reranker instance (lazy-loaded)
+_flashrank_ranker = None
+
+
+def get_flashrank_ranker():
+    """Get or create the FlashRank reranker instance.
+
+    FlashRank is a lightweight reranker (<100ms for 100 candidates)
+    using ms-marco-MiniLM-L-12-v2 model (4MB, no torch/transformers needed).
+    """
+    global _flashrank_ranker
+    if _flashrank_ranker is None:
+        from flashrank import Ranker
+        _flashrank_ranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2")
+    return _flashrank_ranker
+
+
+def rerank_segments_with_flashrank(
+    query: str,
+    segments: list["SegmentResult"],
+    top_k: int = 2,
+) -> list["SegmentResult"]:
+    """Rerank segments using FlashRank cross-encoder.
+
+    Fast reranking (<100ms for typical candidate sets) that improves
+    retrieval precision by scoring query-document pairs directly.
+
+    Args:
+        query: User's search query
+        segments: Candidate segments to rerank
+        top_k: Number of top results to return
+
+    Returns:
+        Top-k segments sorted by relevance score
+    """
+    if not segments:
+        return []
+
+    if len(segments) <= top_k:
+        return segments
+
+    from flashrank import RerankRequest
+
+    ranker = get_flashrank_ranker()
+
+    # Prepare passages for FlashRank
+    # Truncate content to avoid excessive processing time
+    passages = [
+        {"id": s.segment_id, "text": s.content[:2000]}
+        for s in segments
+    ]
+
+    request = RerankRequest(query=query, passages=passages)
+    results = ranker.rerank(request)
+
+    # Map back to SegmentResult objects
+    id_to_segment = {s.segment_id: s for s in segments}
+    reranked = []
+    for r in results[:top_k]:
+        segment = id_to_segment.get(r["id"])
+        if segment:
+            reranked.append(segment)
+
+    logger.debug(f"FlashRank reranked {len(segments)} segments to top {len(reranked)}")
+    return reranked
+
+
+async def segment_summary_search(
+    session: AsyncSession,
+    query_embedding: list[float],
+    game_id: str,
+    limit: int = 5,
+) -> list["SegmentResult"]:
+    """Search segment summary embeddings, return full segments.
+
+    This is the primary search function for the new RAG architecture.
+    Searches on segment summaries (generated at index time) which are
+    designed to match user queries better than chunk embeddings.
+
+    Args:
+        session: Database session
+        query_embedding: Query embedding vector
+        game_id: Game ID to filter by
+        limit: Maximum number of segments to return
+
+    Returns:
+        List of SegmentResult with full segment content
+    """
+    # Search summary embeddings using inner product
+    similarity = -Embedding.embedding.max_inner_product(query_embedding)  # type: ignore[attr-defined]
+
+    stmt = (
+        select(Embedding.segment_id, Embedding.summary_text, similarity.label("score"))  # type: ignore[call-overload]
+        .where(Embedding.type == EmbeddingType.SUMMARY)
+        .where(Embedding.game_id == game_id)
+        .where(Embedding.segment_id.isnot(None))  # type: ignore[union-attr]
+        .order_by(similarity.desc())
+        .limit(limit)
+    )
+
+    result = await session.execute(stmt)
+    rows = list(result)
+
+    if not rows:
+        return []
+
+    segment_ids = [row.segment_id for row in rows]
+
+    # Fetch full segment content
+    segments_stmt = select(Segment).where(Segment.id.in_(segment_ids))  # type: ignore[attr-defined]
+    segments_result = await session.execute(segments_stmt)
+    segments_by_id = {seg.id: seg for seg in segments_result.scalars()}
+
+    # Fetch resource names
+    resource_ids = list({seg.resource_id for seg in segments_by_id.values()})
+    if resource_ids:
+        res_stmt = select(Resource.id, Resource.name).where(Resource.id.in_(resource_ids))  # type: ignore[attr-defined]
+        res_result = await session.execute(res_stmt)
+        resource_names = {row.id: row.name for row in res_result}
+    else:
+        resource_names = {}
+
+    # Build results in score order
+    segment_results: list[SegmentResult] = []
+    for row in rows:
+        segment = segments_by_id.get(row.segment_id)
+        if not segment:
+            continue
+
+        segment_results.append(SegmentResult(
+            segment_id=segment.id,
+            title=segment.title,
+            hierarchy_path=segment.hierarchy_path,
+            content=segment.content,
+            resource_id=segment.resource_id,
+            resource_name=resource_names.get(segment.resource_id, "Unknown"),
+            page_start=segment.page_start,
+            page_end=segment.page_end,
+            word_count=segment.word_count,
+        ))
+
+    logger.info(f"Segment summary search found {len(segment_results)} segments for game {game_id}")
+    return segment_results
+
+
+async def search_segments(
+    session: AsyncSession,
+    query: str,
+    query_embedding: list[float],
+    game_id: str,
+    limit: int = 2,
+    enable_reranking: bool = True,
+) -> list[SegmentResult]:
+    """Search and rerank segments for RAG.
+
+    This is the main entry point for the new segment-summary search architecture.
+    It:
+    1. Searches segment summary embeddings (3x limit for reranking candidates)
+    2. Reranks with FlashRank for precision
+    3. Returns top segments
+
+    Args:
+        session: Database session
+        query: User's search query (for reranking)
+        query_embedding: Pre-computed query embedding
+        game_id: Game ID to filter by
+        limit: Number of segments to return (default: 2)
+        enable_reranking: Whether to apply FlashRank reranking (default: True)
+
+    Returns:
+        List of top SegmentResult for RAG context
+    """
+    # Search segment summaries (retrieve 3x limit for reranking)
+    candidates = await segment_summary_search(
+        session, query_embedding, game_id, limit=limit * 3
+    )
+
+    if not candidates:
+        logger.warning(f"No segment summaries found for game {game_id}")
+        return []
+
+    # Rerank with FlashRank
+    if enable_reranking and len(candidates) > limit:
+        candidates = rerank_segments_with_flashrank(query, candidates, top_k=limit)
+
+    return candidates[:limit]
 
 
 async def expand_chunks_to_segments(

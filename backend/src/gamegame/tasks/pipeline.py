@@ -14,7 +14,7 @@ from gamegame.models import Attachment, Embedding, Fragment, Resource, Segment
 from gamegame.models.attachment import AttachmentType, DetectedType, QualityRating
 from gamegame.models.resource import ProcessingStage, ResourceStatus
 from gamegame.services.pipeline.cleanup import cleanup_markdown
-from gamegame.services.pipeline.embed import embed_content
+from gamegame.services.pipeline.embed import embed_content, embed_segment_summaries
 from gamegame.services.pipeline.finalize import finalize_resource, mark_resource_failed
 from gamegame.services.pipeline.ingest import ingest_document
 from gamegame.services.pipeline.metadata import extract_metadata
@@ -1096,8 +1096,19 @@ async def _stage_embed(
         resume_from=resume_from,
     )
 
+    # Generate segment-level summary embeddings for improved retrieval
+    # These summaries are designed to match user queries better than chunk embeddings
+    segment_summaries_created = await embed_segment_summaries(
+        session=session,
+        resource_id=resource.id,
+        game_id=resource.game_id,
+        segments=db_segments,
+        resource_name=resource.name or "Unknown",
+    )
+
     # Clear cursor on completion
     state.pop("stage_cursor", None)
     state["fragments_created"] = fragments_created
+    state["segment_summaries_created"] = segment_summaries_created
 
     return state

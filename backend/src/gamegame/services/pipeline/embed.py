@@ -358,6 +358,169 @@ async def generate_hyde_questions_batch(
     return results
 
 
+async def generate_segment_summary(
+    content: str,
+    title: str,
+    hierarchy_path: str,
+    resource_name: str,
+) -> str | None:
+    """Generate a summary for a segment optimized for retrieval matching.
+
+    Creates a summary that describes what questions this section can answer,
+    making it more likely to match user queries during search.
+
+    Args:
+        content: The segment content
+        title: Segment title
+        hierarchy_path: Full hierarchy path (e.g., "Setup > Board Preparation")
+        resource_name: Name of the resource/rulebook
+
+    Returns:
+        Summary text (100-150 words) or None if generation fails
+    """
+    if not settings.openai_api_key:
+        return None
+
+    # Truncate content to fit in context
+    content_truncated = content[:4000]
+
+    prompt = f"""Summarize this section from the board game rulebook "{resource_name}". Focus on:
+- What rules or mechanics are explained
+- What player actions are covered
+- Key terms and concepts defined
+- Edge cases or special situations addressed
+
+Write 100-150 words describing what questions this section can answer. Write in a way that would match natural player questions.
+
+Section: {title} ({hierarchy_path})
+Content:
+\"\"\"
+{content_truncated}
+\"\"\""""
+
+    try:
+        response = await create_chat_completion(
+            model=get_model("hyde"),
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=300,
+            temperature=0.7,
+        )
+
+        summary = response.choices[0].message.content or ""
+        return summary.strip() if summary.strip() else None
+    except Exception as e:
+        logger.warning(f"Failed to generate segment summary: {e}")
+        return None
+
+
+async def embed_segment_summaries(
+    session: AsyncSession,
+    resource_id: str,
+    game_id: str,
+    segments: list,  # list[Segment] - avoid import cycle
+    resource_name: str,
+    on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+) -> int:
+    """Generate and embed summaries for segments.
+
+    Creates summary embeddings for each segment to enable segment-level search.
+    These embeddings are designed to match user queries better than chunk embeddings.
+
+    Args:
+        session: Database session
+        resource_id: Resource ID
+        game_id: Game ID
+        segments: List of Segment objects
+        resource_name: Resource name for prompt context
+        on_progress: Optional callback for progress updates
+
+    Returns:
+        Number of segment embeddings created
+    """
+    if not segments:
+        logger.info(f"Resource {resource_id}: No segments to embed summaries for")
+        return 0
+
+    logger.info(f"Resource {resource_id}: Generating summaries for {len(segments)} segments")
+    embeddings_created = 0
+
+    for idx, segment in enumerate(segments):
+        logger.info(
+            f"Resource {resource_id}: Processing segment {idx + 1}/{len(segments)}: {segment.title}"
+        )
+
+        # Generate summary
+        summary = await generate_segment_summary(
+            content=segment.content,
+            title=segment.title,
+            hierarchy_path=segment.hierarchy_path,
+            resource_name=resource_name,
+        )
+
+        if not summary:
+            logger.warning(f"Resource {resource_id}: Failed to generate summary for segment {segment.id}")
+            continue
+
+        # Generate embedding for summary
+        embeddings = await generate_embeddings([summary])
+        if not embeddings:
+            logger.warning(f"Resource {resource_id}: Failed to generate embedding for segment {segment.id}")
+            continue
+
+        summary_embedding = embeddings[0]
+
+        # Create segment summary embedding record
+        segment_emb_record = Embedding(
+            id=f"seg-{segment.id}",
+            segment_id=segment.id,
+            game_id=game_id,
+            resource_id=resource_id,
+            embedding=summary_embedding,
+            type=EmbeddingType.SUMMARY,
+            summary_text=summary,
+            page_number=segment.page_start,
+            section=segment.hierarchy_path,
+            version=1,
+        )
+        session.add(segment_emb_record)
+
+        # Also generate HyDE questions for the segment summary
+        hyde_questions = await generate_hyde_questions(
+            content=segment.content[:2000],
+            section=segment.hierarchy_path,
+            resource_info=ResourceInfo(name=resource_name),
+            num_questions=3,  # Fewer questions per segment than per chunk
+        )
+
+        if hyde_questions:
+            question_embeddings = await generate_embeddings(hyde_questions)
+            for q_idx, (question, q_embedding) in enumerate(
+                zip(hyde_questions, question_embeddings, strict=False)
+            ):
+                hyde_emb_record = Embedding(
+                    id=f"seg-{segment.id}-q{q_idx}",
+                    segment_id=segment.id,
+                    game_id=game_id,
+                    resource_id=resource_id,
+                    embedding=q_embedding,
+                    type=EmbeddingType.QUESTION,
+                    question_index=q_idx,
+                    question_text=question,
+                    page_number=segment.page_start,
+                    section=segment.hierarchy_path,
+                    version=1,
+                )
+                session.add(hyde_emb_record)
+
+        embeddings_created += 1
+
+        if on_progress:
+            await on_progress(idx + 1, len(segments))
+
+    logger.info(f"Resource {resource_id}: Created {embeddings_created} segment summary embeddings")
+    return embeddings_created
+
+
 async def embed_content(
     session: AsyncSession,
     resource_id: str,

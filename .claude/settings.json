@@ -1,0 +1,6 @@
+{
+  "enabledPlugins": {
+    "llm-application-dev@claude-code-workflows": true,
+    "python-development@claude-code-workflows": true
+  }
+}

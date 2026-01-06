@@ -11,14 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from gamegame.config import settings
-from gamegame.models import Attachment, Game, Resource
+from gamegame.models import Attachment, Embedding, Fragment, Game, Resource
+from gamegame.models.embedding import EmbeddingType
 from gamegame.models.model_config import get_model
 from gamegame.services.openai_client import get_openai_client
 from gamegame.services.search import (
     PageResult,
     SearchService,
     SegmentResult,
-    expand_chunks_to_segments,
+    search_segments,
 )
 
 logger = logging.getLogger(__name__)
@@ -396,15 +397,13 @@ async def _search_images(
 
     # If we have an embedding, search fragments with attachment_ids
     if query_embedding:
-        from gamegame.models import Embedding, Fragment
-
         # Search content embeddings and join to fragments to get attachment_id
         similarity = -Embedding.embedding.max_inner_product(query_embedding)  # type: ignore[attr-defined]
 
         frag_stmt = (
             select(Fragment.attachment_id, similarity.label("score"))
             .join(Embedding, Embedding.fragment_id == Fragment.id)
-            .where(Embedding.type == "content")
+            .where(Embedding.type == EmbeddingType.CONTENT)
             .where(Embedding.game_id == game_id)
             .where(Fragment.attachment_id.is_not(None))  # type: ignore[union-attr]
             .order_by(similarity.desc())
@@ -903,7 +902,7 @@ def _format_pages_as_context(pages: list[PageResult]) -> str:
 def _format_segments_as_context(
     segments: list[SegmentResult],
     max_segment_chars: int = 4000,
-    max_total_chars: int = 16000,
+    max_total_chars: int = 8000,
 ) -> str:
     """Format segment results into context for the prompt.
 
@@ -976,22 +975,22 @@ async def single_pass_chat(
     session: AsyncSession,
     game: Game,
     messages: list[ChatMessage],
-    max_segments: int = 3,
+    max_segments: int = 2,
 ) -> ChatResponse:
     """Process a chat request using single-pass RAG.
 
     This approach:
-    1. Searches for relevant content BEFORE calling the LLM
-    2. Expands matched chunks to full segments for better semantic context
-    3. Makes a single LLM call with all context (no tool loops)
+    1. Searches segment summary embeddings directly
+    2. Reranks with FlashRank for precision
+    3. Makes a single LLM call with top segments (no tool loops)
 
-    Result: 3-4x faster with similar or better accuracy.
+    Result: Faster and more accurate than hybrid search with fragment expansion.
 
     Args:
         session: Database session
         game: Game to chat about
         messages: Conversation history
-        max_segments: Maximum segments to include in context
+        max_segments: Maximum segments to include in context (default: 2)
 
     Returns:
         ChatResponse with answer and citations
@@ -1006,38 +1005,28 @@ async def single_pass_chat(
     # Get the user's latest question
     user_question = messages[-1].content if messages else ""
 
-    # 1. Search for relevant content (no LLM call needed for answer type detection)
+    # 1. Search segment summaries with FlashRank reranking
     search_service = SearchService()
     search_start = time.time()
 
     # Get query embedding
     query_embedding = await search_service.get_embedding(user_question)
 
-    # Execute hybrid search
-    from gamegame.services.search import hybrid_search
-
-    search_response = await hybrid_search(
-        session=session,
-        query=user_question,
-        query_embedding=query_embedding,
-        game_id=game.id,  # type: ignore[arg-type]
-        limit=10,  # Get more chunks to ensure good segment coverage
-        enable_reranking=False,
-        include_fts=False,  # Disabled - embeddings-only for better semantic matching
-    )
+    if query_embedding:
+        # Use new segment summary search with FlashRank reranking
+        segments = await search_segments(
+            session=session,
+            query=user_question,
+            query_embedding=query_embedding,
+            game_id=game.id,  # type: ignore[arg-type]
+            limit=max_segments,
+            enable_reranking=True,  # Use FlashRank for precision
+        )
+    else:
+        segments = []
 
     search_time = time.time() - search_start
-    logger.info(f"Single-pass search: {len(search_response.results)} results in {search_time:.2f}s")
-
-    # 2. Expand chunks to full segments
-    expand_start = time.time()
-    segments = await expand_chunks_to_segments(
-        session=session,
-        results=search_response.results,
-        max_segments=max_segments,
-    )
-    expand_time = time.time() - expand_start
-    logger.info(f"Expanded to {len(segments)} segments in {expand_time:.2f}s")
+    logger.info(f"Single-pass segment search: {len(segments)} segments in {search_time:.2f}s")
 
     # 3. Build context and make single LLM call
     system_prompt = _build_single_pass_system_prompt(game, segments)
@@ -1082,7 +1071,7 @@ async def single_pass_chat(
     total_time = time.time() - start_time
     logger.info(
         f"Single-pass chat complete: {total_time:.2f}s total "
-        f"(search: {search_time:.2f}s, expand: {expand_time:.2f}s, LLM: {llm_time:.2f}s)"
+        f"(search: {search_time:.2f}s, LLM: {llm_time:.2f}s)"
     )
 
     return ChatResponse(
@@ -1096,22 +1085,22 @@ async def single_pass_chat_stream(
     session: AsyncSession,
     game: Game,
     messages: list[ChatMessage],
-    max_segments: int = 3,
+    max_segments: int = 2,
 ) -> AsyncGenerator[str, None]:
     """Stream a chat response using single-pass RAG.
 
     This approach:
-    1. Searches for relevant content BEFORE calling the LLM
-    2. Expands matched chunks to full segments for better semantic context
+    1. Searches segment summary embeddings directly
+    2. Reranks with FlashRank for precision
     3. Streams a single LLM response (no tool loops)
 
-    Result: 3-4x faster with similar or better accuracy.
+    Result: Faster and more accurate than hybrid search with fragment expansion.
 
     Args:
         session: Database session
         game: Game to chat about
         messages: Conversation history
-        max_segments: Maximum segments to include in context
+        max_segments: Maximum segments to include in context (default: 2)
 
     Yields:
         JSON-serialized stream events
@@ -1128,31 +1117,25 @@ async def single_pass_chat_stream(
         # Get the user's latest question
         user_question = messages[-1].content if messages else ""
 
-        # 1. Search for relevant content
+        # 1. Search segment summaries with FlashRank reranking
         search_service = SearchService()
         query_embedding = await search_service.get_embedding(user_question)
 
-        from gamegame.services.search import hybrid_search
-
-        search_response = await hybrid_search(
-            session=session,
-            query=user_question,
-            query_embedding=query_embedding,
-            game_id=game.id,  # type: ignore[arg-type]
-            limit=10,
-            enable_reranking=False,
-            include_fts=False,  # Disabled - embeddings-only for better semantic matching
-        )
-
-        # 2. Expand chunks to full segments
-        segments = await expand_chunks_to_segments(
-            session=session,
-            results=search_response.results,
-            max_segments=max_segments,
-        )
+        if query_embedding:
+            # Use new segment summary search with FlashRank reranking
+            segments = await search_segments(
+                session=session,
+                query=user_question,
+                query_embedding=query_embedding,
+                game_id=game.id,  # type: ignore[arg-type]
+                limit=max_segments,
+                enable_reranking=True,  # Use FlashRank for precision
+            )
+        else:
+            segments = []
 
         search_time = time.time() - start_time
-        logger.info(f"Single-pass prep: {len(segments)} segments in {search_time:.2f}s")
+        logger.info(f"Single-pass segment search: {len(segments)} segments in {search_time:.2f}s")
 
         # 3. Build context and stream LLM response
         system_prompt = _build_single_pass_system_prompt(game, segments)

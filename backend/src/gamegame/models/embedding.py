@@ -11,20 +11,34 @@ from gamegame.models.base import TimestampMixin
 
 
 class EmbeddingType(str, Enum):
-    """Type of embedding."""
+    """Type of embedding.
 
-    CONTENT = "content"
-    QUESTION = "question"
+    Note: Values are uppercase to match PostgreSQL enum 'embeddingtype'.
+    """
+
+    CONTENT = "CONTENT"    # Fragment content embedding
+    QUESTION = "QUESTION"  # Fragment/Segment HyDE question embedding
+    SUMMARY = "SUMMARY"    # Segment summary embedding
 
 
 class Embedding(TimestampMixin, SQLModel, table=True):
-    """Separate embedding storage for HyDE questions and content."""
+    """Separate embedding storage for HyDE questions, content, and segment summaries."""
 
     __tablename__ = "embeddings"
 
-    # ID format: fragmentId or fragmentId-q{0-4}
+    # ID format: fragmentId, fragmentId-q{0-4}, seg-{segmentId}, seg-{segmentId}-q{0-4}
     id: str = Field(primary_key=True, max_length=50)
-    fragment_id: str = Field(foreign_key="fragments.id", index=True, ondelete="CASCADE", max_length=21)
+
+    # Fragment reference (nullable - not set for segment embeddings)
+    fragment_id: str | None = Field(
+        default=None, foreign_key="fragments.id", index=True, ondelete="CASCADE", max_length=21
+    )
+
+    # Segment reference (nullable - not set for fragment embeddings)
+    segment_id: str | None = Field(
+        default=None, foreign_key="segments.id", index=True, ondelete="CASCADE", max_length=21
+    )
+
     game_id: str = Field(foreign_key="games.id", index=True, ondelete="CASCADE", max_length=21)
     resource_id: str = Field(foreign_key="resources.id", index=True, ondelete="CASCADE", max_length=21)
 
@@ -37,6 +51,7 @@ class Embedding(TimestampMixin, SQLModel, table=True):
     type: EmbeddingType = Field(default=EmbeddingType.CONTENT)
     question_index: int | None = Field(default=None)
     question_text: str | None = Field(default=None)
+    summary_text: str | None = Field(default=None)  # For SUMMARY type embeddings
     version: int = Field(default=0)  # Matches TypeScript
 
     # Denormalized fields for efficient filtering
@@ -56,6 +71,8 @@ class Embedding(TimestampMixin, SQLModel, table=True):
         ),
         # Index for lookups by fragment
         Index("embedding_fragment_type_idx", "fragment_id", "type"),
+        # Index for lookups by segment
+        Index("embedding_segment_type_idx", "segment_id", "type"),
         # Index for game-scoped searches
         Index("embedding_game_id_idx", "game_id"),
     )
@@ -65,10 +82,12 @@ class EmbeddingCreate(SQLModel):
     """Schema for creating an embedding."""
 
     id: str
-    fragment_id: str
+    fragment_id: str | None = None
+    segment_id: str | None = None
     game_id: str
     resource_id: str
     embedding: list[float]
     type: EmbeddingType = EmbeddingType.CONTENT
     question_index: int | None = None
     question_text: str | None = None
+    summary_text: str | None = None
