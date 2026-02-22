@@ -387,7 +387,7 @@ export const api = {
       if (options?.limit) params.set("limit", options.limit.toString());
       if (options?.offset) params.set("offset", options.offset.toString());
       const query = params.toString() ? `?${params}` : "";
-      return request<Attachment[]>(`/attachments/by-resource/${resourceId}${query}`);
+      return request<Attachment[]>(`/resources/${resourceId}/attachments${query}`);
     },
 
     listByGame: (
@@ -399,7 +399,7 @@ export const api = {
       if (options?.limit) params.set("limit", options.limit.toString());
       if (options?.offset) params.set("offset", options.offset.toString());
       const query = params.toString() ? `?${params}` : "";
-      return request<Attachment[]>(`/attachments/by-game/${gameId}${query}`);
+      return request<Attachment[]>(`/games/${gameId}/attachments${query}`);
     },
 
     // Nested route version
@@ -528,6 +528,9 @@ export const api = {
         clearTimeout(timeoutId);
         if (err instanceof Error) {
           if (err.name === "AbortError") {
+            if (signal?.aborted) {
+              throw err;
+            }
             throw new ApiError(0, "Chat request timed out");
           }
           throw new ApiError(0, `Network error: ${err.message}`);
@@ -579,6 +582,9 @@ export const api = {
         }
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") {
+          if (signal?.aborted) {
+            throw err;
+          }
           throw new ApiError(0, "Chat stream timed out");
         }
         throw err;

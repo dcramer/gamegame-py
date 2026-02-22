@@ -2,6 +2,7 @@
 
 import json
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -29,7 +30,7 @@ router = APIRouter()
 class MessageInput(BaseModel):
     """A single message in the conversation."""
 
-    role: str  # "user" or "assistant"
+    role: Literal["user", "assistant"]
     content: str
 
 
@@ -111,7 +112,11 @@ async def chat_with_game(
                 yield "data: [DONE]\n\n"
             except Exception:
                 logger.exception(f"Error during chat stream for game {game.id}")
-                error_data = json.dumps({"error": "An error occurred during chat"})
+                error_data = json.dumps({
+                    "type": "error",
+                    "id": "stream-error",
+                    "error": "An error occurred during chat",
+                })
                 yield f"data: {error_data}\n\n"
                 yield "data: [DONE]\n\n"
 
