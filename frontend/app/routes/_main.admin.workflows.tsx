@@ -394,11 +394,14 @@ export default function WorkflowsPage() {
                                 {selectedWorkflow.error &&
                                   (() => {
                                     // Get suggestion from pattern-based helper or from backend extra_data
-                                    const patternSuggestion = getErrorSuggestion(selectedWorkflow.error);
+                                    const patternSuggestion = getErrorSuggestion(
+                                      selectedWorkflow.error,
+                                    );
                                     const backendSuggestion =
                                       (selectedWorkflow.extra_data?.suggestion as string) || null;
                                     // Prefer backend suggestion as it's more specific
-                                    const suggestionText = backendSuggestion || patternSuggestion?.suggestion;
+                                    const suggestionText =
+                                      backendSuggestion || patternSuggestion?.suggestion;
                                     return (
                                       <div className="rounded-md bg-destructive/10 p-4 space-y-2">
                                         <div className="font-medium text-destructive">
