@@ -68,6 +68,28 @@ When testing chat responses, assess:
 4. Re-test same question to verify improvement
 5. Test related questions to check for regressions
 
+## Lightweight Eval Harness
+
+A simple deterministic eval runner is available for repeatable checks:
+
+```bash
+# List cases
+mise cli evals list
+
+# Run suite against a specific game slug/id
+mise cli evals run --game scythe-2016
+
+# Run against a non-default API URL
+mise cli evals run --game scythe-2016 --url http://localhost:8000
+```
+
+Suite file: `backend/evals/cases/boardgame_smoke.json`
+
+Each case supports:
+- `must_include`: required phrases in the answer
+- `must_not_include`: forbidden phrases
+- `min_citations`: minimum required citation count
+
 ## QA Examples
 
 ### Scythe
@@ -76,3 +98,11 @@ See [docs/scythe-example.md](./docs/scythe-example.md) for a complete QA test su
 - 5 test questions (simple → complex)
 - Expected answers with evaluation checklists
 - Scoring guide
+
+## Frontend Smoke Tests
+
+Playwright smoke tests are available for basic route render checks:
+
+```bash
+npm --prefix frontend run test:e2e
+```

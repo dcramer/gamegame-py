@@ -13,6 +13,7 @@
     "build": "react-router build",
     "start": "react-router-serve ./build/server/index.js",
     "preview": "react-router-serve ./build/server/index.js",
+    "test:e2e": "playwright test",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",

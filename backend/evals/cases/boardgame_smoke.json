@@ -1,0 +1,30 @@
+{
+  "name": "Board Game Chat Smoke",
+  "description": "Lightweight lexical evals for core answer quality",
+  "defaults": {
+    "game": null
+  },
+  "cases": [
+    {
+      "id": "setup_question",
+      "prompt": "How do I set up the game?",
+      "must_include": ["set up"],
+      "must_not_include": ["I can help with strategy"],
+      "min_citations": 1
+    },
+    {
+      "id": "turn_order_question",
+      "prompt": "What happens on a turn?",
+      "must_include": ["turn"],
+      "must_not_include": ["not sure"],
+      "min_citations": 1
+    },
+    {
+      "id": "edge_case_question",
+      "prompt": "What happens if two effects trigger at the same time?",
+      "must_include": ["if"],
+      "must_not_include": ["I made this up"],
+      "min_citations": 1
+    }
+  ]
+}

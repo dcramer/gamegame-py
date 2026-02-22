@@ -6,6 +6,7 @@ from gamegame.cli.ask import app as ask_app
 from gamegame.cli.attachments import app as attachments_app
 from gamegame.cli.bgg import app as bgg_app
 from gamegame.cli.db import app as db_app
+from gamegame.cli.evals import app as evals_app
 from gamegame.cli.games import app as games_app
 from gamegame.cli.maintenance import app as maintenance_app
 from gamegame.cli.resources import app as resources_app
@@ -24,6 +25,7 @@ app.add_typer(bgg_app, name="bgg")
 app.add_typer(workflows_app, name="workflows")
 app.add_typer(ask_app, name="ask")
 app.add_typer(maintenance_app, name="maintenance")
+app.add_typer(evals_app, name="evals")
 
 
 @app.command()
