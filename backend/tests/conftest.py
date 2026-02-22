@@ -70,11 +70,18 @@ async def test_engine():
         poolclass=NullPool,
     )
 
-    async with engine.begin() as conn:
-        # Enable pgvector extension
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        # Create all tables
-        await conn.run_sync(SQLModel.metadata.create_all)
+    try:
+        async with engine.begin() as conn:
+            # Enable pgvector extension
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            # Create all tables
+            await conn.run_sync(SQLModel.metadata.create_all)
+    except Exception as e:  # pragma: no cover - infrastructure-dependent
+        await engine.dispose()
+        pytest.skip(
+            "Test database unavailable. Start it with `mise up:test` and re-run tests. "
+            f"(DATABASE_URL_TEST={settings.database_url_test!r}, error={e})"
+        )
 
     yield engine
 
