@@ -188,6 +188,13 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   toolCalls?: ToolCall[];
+  citations?: Citation[];
+  images?: Array<{
+    id: string;
+    url: string;
+    caption: string | null;
+    description: string | null;
+  }>;
 }
 
 export interface Citation {

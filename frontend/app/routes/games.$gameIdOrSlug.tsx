@@ -178,7 +178,7 @@ export default function GamePage({ loaderData }: Route.ComponentProps) {
                     <MessageBubble
                       key={i}
                       message={message}
-                      citations={message.role === "assistant" ? citations : []}
+                      citations={message.role === "assistant" ? (message.citations ?? []) : []}
                     />
                   ))}
 

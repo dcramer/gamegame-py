@@ -1,46 +1,8 @@
-import React from "react";
 import Markdown from "react-markdown";
 import type { ChatMessage, Citation } from "~/api/types";
 import { Badge } from "~/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "~/components/ui/tooltip";
 import { ToolCallsList } from "./tool-call";
-
-interface CitationLinkProps {
-  number: number;
-  citation?: Citation;
-}
-
-function CitationLink({ number, citation }: CitationLinkProps) {
-  const locationLabel = citation?.page_number ? `p${citation.page_number}` : null;
-  const pillLabel = citation
-    ? [citation.resource_name, locationLabel].filter(Boolean).join(", ")
-    : `Source ${number}`;
-
-  return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="inline-flex align-middle">
-            <span className="inline-flex items-center justify-center gap-1 mx-1 text-[0.7rem] leading-none font-semibold uppercase tracking-wide text-muted-foreground hover:text-primary cursor-help">
-              {pillLabel}
-            </span>
-          </span>
-        </TooltipTrigger>
-        {citation && (
-          <TooltipContent side="top" className="max-w-xs">
-            <div>
-              <div className="font-semibold">{citation.resource_name}</div>
-              {citation.page_number && <div className="text-xs">Page {citation.page_number}</div>}
-              {citation.section && (
-                <div className="text-xs text-muted-foreground">{citation.section}</div>
-              )}
-            </div>
-          </TooltipContent>
-        )}
-      </Tooltip>
-    </TooltipProvider>
-  );
-}
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -62,41 +24,6 @@ export function MessageBubble({ message, citations = [], isStreaming }: MessageB
     );
   }
 
-  // For assistant messages, render markdown
-  // Process content to replace [n] citation markers with components
-  const processContent = (content: string): React.ReactNode => {
-    // Split on citation markers like [1], [2], etc.
-    const parts = content.split(/(\[\d+\])/g);
-
-    return parts.map((part, idx) => {
-      const match = part.match(/^\[(\d+)\]$/);
-      if (match) {
-        const citationNumber = parseInt(match[1], 10);
-        const citation = citations[citationNumber - 1];
-        return <CitationLink key={`citation-${idx}`} number={citationNumber} citation={citation} />;
-      }
-      return part;
-    });
-  };
-
-  // Extract text from React children (handles nested elements)
-  const getTextContent = (children: React.ReactNode): string => {
-    if (typeof children === "string") return children;
-    if (typeof children === "number") return String(children);
-    if (!children) return "";
-    if (Array.isArray(children)) {
-      return children.map(getTextContent).join("");
-    }
-    // Handle React elements with children
-    if (React.isValidElement(children) && children.props) {
-      const props = children.props as { children?: React.ReactNode };
-      if (props.children) {
-        return getTextContent(props.children);
-      }
-    }
-    return "";
-  };
-
   return (
     <div className="flex flex-col gap-2">
       {/* Render tool calls above the message content */}
@@ -107,19 +34,9 @@ export function MessageBubble({ message, citations = [], isStreaming }: MessageB
       <div className="flex justify-start">
         <div className="max-w-[85%] rounded-lg px-4 py-2 bg-muted text-foreground">
           <div className="prose prose-sm dark:prose-invert max-w-none prose-p:my-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-headings:my-2">
-            <Markdown
-              components={{
-                p: ({ children }) => <p>{processContent(getTextContent(children))}</p>,
-                li: ({ children }) => <li>{processContent(getTextContent(children))}</li>,
-                h1: ({ children }) => <h1>{processContent(getTextContent(children))}</h1>,
-                h2: ({ children }) => <h2>{processContent(getTextContent(children))}</h2>,
-                h3: ({ children }) => <h3>{processContent(getTextContent(children))}</h3>,
-                h4: ({ children }) => <h4>{processContent(getTextContent(children))}</h4>,
-              }}
-            >
-              {message.content}
-            </Markdown>
+            <Markdown>{message.content}</Markdown>
           </div>
+          {citations.length > 0 && <CitationsList citations={citations} />}
           {isStreaming && <span className="inline-block w-2 h-4 bg-current animate-pulse ml-1" />}
         </div>
       </div>

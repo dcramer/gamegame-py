@@ -51,13 +51,21 @@ interface ErrorEvent {
   error: string;
 }
 
+interface ContextDataEvent {
+  type: "context-data";
+  id: string;
+  citations: Citation[];
+  images: ChatImage[];
+}
+
 type StreamEvent =
   | TextDeltaEvent
   | ToolInputStartEvent
   | ToolInputAvailableEvent
   | ToolOutputAvailableEvent
   | FinishEvent
-  | ErrorEvent;
+  | ErrorEvent
+  | ContextDataEvent;
 
 // Re-export ToolCall for consumers that import from this file
 export type { ToolCall } from "~/api/types";
@@ -264,17 +272,20 @@ export function useChat(gameSlug: string) {
                 }));
                 break;
 
+              case "context-data":
+                extractedCitations.push(...event.citations);
+                extractedImages.push(...event.images);
+                setState((prev) => ({
+                  ...prev,
+                  citations: extractedCitations,
+                  images: extractedImages,
+                }));
+                break;
+
               case "error":
                 throw new Error(event.error);
             }
           }
-
-          // Add assistant message with tool calls
-          const assistantMessage: ChatMessage = {
-            role: "assistant",
-            content: fullContent,
-            toolCalls: Array.from(toolCallsMap.values()),
-          };
 
           // Deduplicate citations
           const uniqueCitations: Citation[] = [];
@@ -296,6 +307,15 @@ export function useChat(gameSlug: string) {
             }
           }
 
+          // Add assistant message with structured metadata from this turn
+          const assistantMessage: ChatMessage = {
+            role: "assistant",
+            content: fullContent,
+            toolCalls: Array.from(toolCallsMap.values()),
+            citations: uniqueCitations,
+            images: uniqueImages,
+          };
+
           setState((prev) => ({
             ...prev,
             messages: [...updatedMessages, assistantMessage],
@@ -312,6 +332,7 @@ export function useChat(gameSlug: string) {
           const assistantMessage: ChatMessage = {
             role: "assistant",
             content: response.content,
+            citations: response.citations,
           };
 
           setState((prev) => ({

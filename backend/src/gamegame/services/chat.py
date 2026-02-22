@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
@@ -113,6 +114,15 @@ class ErrorEvent(StreamEvent):
     error: str = ""
 
 
+@dataclass
+class ContextDataEvent(StreamEvent):
+    """Structured context metadata (citations/images) for streaming clients."""
+
+    type: str = field(default="context-data", init=False)
+    citations: list[dict[str, Any]] = field(default_factory=list)
+    images: list[dict[str, Any]] = field(default_factory=list)
+
+
 def _serialize_event(event: StreamEvent) -> str:
     """Serialize a stream event to JSON string for SSE."""
     data: dict[str, Any] = {
@@ -133,6 +143,9 @@ def _serialize_event(event: StreamEvent) -> str:
         data["totalUsage"] = event.totalUsage
     elif isinstance(event, ErrorEvent):
         data["error"] = event.error
+    elif isinstance(event, ContextDataEvent):
+        data["citations"] = event.citations
+        data["images"] = event.images
 
     return json.dumps(data)
 
@@ -916,10 +929,7 @@ def _format_pages_as_context(pages: list[PageResult]) -> str:
     if not pages:
         return "(No relevant pages found)"
 
-    parts = []
-    for page in pages:
-        parts.append(f"--- Page {page.page_number} ({page.resource_name}) ---\n{page.content}")
-
+    parts = [f"--- Page {page.page_number} ({page.resource_name}) ---\n{page.content}" for page in pages]
     return "\n\n".join(parts)
 
 
@@ -972,6 +982,78 @@ def _format_segments_as_context(
         total_chars += len(part)
 
     return "\n\n".join(parts)
+
+
+ATTACHMENT_REF_RE = re.compile(r"attachment://([A-Za-z0-9_-]+)")
+
+
+def _build_segment_citations(segments: list[SegmentResult]) -> list[dict[str, Any]]:
+    """Build structured citation payload from retrieved segments."""
+    citations: list[dict[str, Any]] = []
+    seen: set[tuple[str, int | None, str]] = set()
+
+    for segment in segments:
+        key = (segment.resource_id, segment.page_start, segment.hierarchy_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        citations.append({
+            "resource_id": segment.resource_id,
+            "resource_name": segment.resource_name,
+            "page_number": segment.page_start,
+            "section": segment.hierarchy_path,
+            "relevance": "primary",
+        })
+
+    return citations
+
+
+async def _resolve_segment_images(
+    session: AsyncSession,
+    game_id: str,
+    segments: list[SegmentResult],
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Resolve attachment:// references in segments to image payloads."""
+    attachment_ids: list[str] = []
+    seen_ids: set[str] = set()
+
+    for segment in segments:
+        for attachment_id in ATTACHMENT_REF_RE.findall(segment.content):
+            if attachment_id in seen_ids:
+                continue
+            seen_ids.add(attachment_id)
+            attachment_ids.append(attachment_id)
+            if len(attachment_ids) >= limit:
+                break
+        if len(attachment_ids) >= limit:
+            break
+
+    if not attachment_ids:
+        return []
+
+    stmt = (
+        select(Attachment)
+        .where(Attachment.id.in_(attachment_ids))  # type: ignore[attr-defined]
+        .where(Attachment.game_id == game_id)
+    )
+    result = await session.execute(stmt)
+    attachments_by_id = {attachment.id: attachment for attachment in result.scalars()}
+
+    images: list[dict[str, Any]] = []
+    for attachment_id in attachment_ids:
+        attachment = attachments_by_id.get(attachment_id)
+        if not attachment:
+            continue
+        images.append({
+            "id": attachment.id,
+            "url": attachment.url,
+            "caption": attachment.caption,
+            "description": attachment.description,
+            "page_number": attachment.page_number,
+        })
+
+    return images
 
 
 def _build_single_pass_system_prompt(game: Game, context: list[SegmentResult] | list[PageResult]) -> str:
@@ -1160,6 +1242,19 @@ async def single_pass_chat_stream(
 
         search_time = time.time() - start_time
         logger.info(f"Single-pass segment search: {len(segments)} segments in {search_time:.2f}s")
+
+        # Emit structured context metadata so clients can render citations/images
+        # even though single-pass mode does not use tool call events.
+        citations_payload = _build_segment_citations(segments)
+        images_payload = await _resolve_segment_images(
+            session=session,
+            game_id=game.id,  # type: ignore[arg-type]
+            segments=segments,
+        )
+        yield _serialize_event(ContextDataEvent(
+            citations=citations_payload,
+            images=images_payload,
+        ))
 
         # 3. Build context and stream LLM response
         system_prompt = _build_single_pass_system_prompt(game, segments)
