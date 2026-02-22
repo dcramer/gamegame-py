@@ -87,52 +87,25 @@ async def detect_query_answer_types(
 
     client = get_openai_client()
 
-    prompt = f"""Analyze this board game question and classify what types of answers it needs.
+    prompt = f"""Classify this board game question into 1-3 answer types.
 
 Question: {query}
 
-Available answer type categories:
+Categories (pick most specific):
+- setup_instructions: "How do I set up?" "Starting positions?"
+- turn_structure: "What can I do on my turn?" "Turn order?"
+- win_conditions: "How do I win?" "Victory points?"
+- scoring: "How are points calculated?"
+- combat_rules: "How does fighting work?" "Attack/defense?"
+- movement_rules: "How do pieces move?"
+- component_list: "What's in the box?" "How many cards?"
+- rule_clarification: "Can I do X?" "What happens when...?"
+- edge_case: Unusual situations, exceptions
+- timing: "When does X happen?" "Order of operations?"
+- player_count: Number of players
+- game_overview: General description
 
-**Metadata:**
-- player_count: Number of players supported
-- play_time: How long the game takes
-- age_rating: Recommended age
-- game_overview: High-level game description
-- publisher_info: Publisher, designer, edition info
-
-**Rules:**
-- setup_instructions: How to set up the game
-- turn_structure: How turns work
-- win_conditions: How to win
-- end_game: When/how the game ends
-- scoring: How points are calculated
-
-**Components:**
-- component_list: What pieces are included
-- card_types: Types of cards in the game
-- resource_types: Types of resources/tokens
-- board_layout: Board setup and areas
-- token_types: Types of tokens/markers
-
-**Gameplay:**
-- action_options: Actions players can take
-- combat_rules: How combat/conflict works
-- movement_rules: How to move pieces
-- trading_rules: How trading/exchange works
-- special_abilities: Special powers or abilities
-
-**Clarifications:**
-- edge_case: Unusual situations
-- example: Example of gameplay
-- faq: Frequently asked question
-- timing: When something happens
-- rule_clarification: Clarifying a specific rule
-
-Select 1-3 answer types that best match what this question is asking for.
-Be specific and conservative - only select types that clearly match the question intent.
-
-Return ONLY a JSON object with an "answerTypes" array, nothing else.
-Format: {{ "answerTypes": ["type1", "type2", ...] }}"""
+Return JSON only: {{ "answerTypes": ["type1", "type2"] }}"""
 
     try:
         response = await client.chat.completions.create(
