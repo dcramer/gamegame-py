@@ -1056,6 +1056,46 @@ async def _resolve_segment_images(
     return images
 
 
+def _segment_limit_for_question(question: str, *, minimum: int = 2, maximum: int = 6) -> int:
+    """Choose retrieval depth based on query complexity."""
+    text = question.strip().lower()
+    if not text:
+        return minimum
+
+    words = len(text.split())
+    complexity_signals = [
+        " and ",
+        " or ",
+        " if ",
+        " when ",
+        " while ",
+        " unless ",
+        " except ",
+        " timing",
+        " interaction",
+        " resolve",
+        " before ",
+        " after ",
+        " simultaneous",
+    ]
+    signal_hits = sum(1 for signal in complexity_signals if signal in text)
+
+    if words >= 24 or signal_hits >= 3 or "\n" in text:
+        return maximum
+    if words >= 12 or signal_hits >= 1:
+        return min(maximum, 4)
+    return minimum
+
+
+def _no_context_response(user_question: str) -> str:
+    """Fallback response when retrieval finds no grounded context."""
+    question = user_question.strip() or "that"
+    return (
+        f"I don't see this covered in the available rules for \"{question}\". "
+        "Try rephrasing with specific rule terms, or upload/add the relevant rulebook section."
+    )
+
+
 def _build_single_pass_system_prompt(game: Game, context: list[SegmentResult] | list[PageResult]) -> str:
     """Build the system prompt for single-pass RAG."""
     year_part = f" ({game.year})" if game.year else ""
@@ -1081,7 +1121,7 @@ async def single_pass_chat(
     session: AsyncSession,
     game: Game,
     messages: list[ChatMessage],
-    max_segments: int = 2,
+    max_segments: int | None = None,
 ) -> ChatResponse:
     """Process a chat request using single-pass RAG.
 
@@ -1118,6 +1158,8 @@ async def single_pass_chat(
     # Get query embedding
     query_embedding = await search_service.get_embedding(user_question)
 
+    segment_limit = max_segments or _segment_limit_for_question(user_question)
+
     if query_embedding:
         # Use new segment summary search with FlashRank reranking
         segments = await search_segments(
@@ -1125,7 +1167,7 @@ async def single_pass_chat(
             query=user_question,
             query_embedding=query_embedding,
             game_id=game.id,  # type: ignore[arg-type]
-            limit=max_segments,
+            limit=segment_limit,
             enable_reranking=True,  # Use FlashRank for precision
         )
     else:
@@ -1133,6 +1175,14 @@ async def single_pass_chat(
 
     search_time = time.time() - search_start
     logger.info(f"Single-pass segment search: {len(segments)} segments in {search_time:.2f}s")
+
+    if not segments:
+        logger.info("Single-pass chat returning no-context fallback response")
+        return ChatResponse(
+            content=_no_context_response(user_question),
+            citations=[],
+            confidence="low",
+        )
 
     # 3. Build context and make single LLM call
     system_prompt = _build_single_pass_system_prompt(game, segments)
@@ -1191,7 +1241,7 @@ async def single_pass_chat_stream(
     session: AsyncSession,
     game: Game,
     messages: list[ChatMessage],
-    max_segments: int = 2,
+    max_segments: int | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream a chat response using single-pass RAG.
 
@@ -1227,6 +1277,8 @@ async def single_pass_chat_stream(
         search_service = SearchService()
         query_embedding = await search_service.get_embedding(user_question)
 
+        segment_limit = max_segments or _segment_limit_for_question(user_question)
+
         if query_embedding:
             # Use new segment summary search with FlashRank reranking
             segments = await search_segments(
@@ -1234,7 +1286,7 @@ async def single_pass_chat_stream(
                 query=user_question,
                 query_embedding=query_embedding,
                 game_id=game.id,  # type: ignore[arg-type]
-                limit=max_segments,
+                limit=segment_limit,
                 enable_reranking=True,  # Use FlashRank for precision
             )
         else:
@@ -1255,6 +1307,15 @@ async def single_pass_chat_stream(
             citations=citations_payload,
             images=images_payload,
         ))
+
+        if not segments:
+            fallback = _no_context_response(user_question)
+            yield _serialize_event(TextDeltaEvent(text=fallback))
+            yield _serialize_event(FinishEvent(
+                finishReason="stop",
+                totalUsage={"promptTokens": 0, "completionTokens": 0},
+            ))
+            return
 
         # 3. Build context and stream LLM response
         system_prompt = _build_single_pass_system_prompt(game, segments)

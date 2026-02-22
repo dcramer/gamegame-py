@@ -10,7 +10,13 @@ from sqlmodel import select
 from gamegame.api.deps import AdminUser, CurrentUserOptional, SessionDep
 from gamegame.api.utils import get_game_by_id_or_slug
 from gamegame.models import Attachment, Fragment, Resource, Segment
-from gamegame.models.resource import ResourceRead, ResourceStatus, ResourceType, ResourceUpdate
+from gamegame.models.resource import (
+    ProcessingStage,
+    ResourceRead,
+    ResourceStatus,
+    ResourceType,
+    ResourceUpdate,
+)
 from gamegame.services.storage import storage
 from gamegame.tasks import queue
 from gamegame.tasks.queue import PIPELINE_TIMEOUT_SECONDS
@@ -314,7 +320,10 @@ async def reprocess_resource(
     resource_id: str,
     session: SessionDep,
     _user: AdminUser,
-    start_stage: Annotated[str | None, Query(description="Stage to start from")] = None,
+    start_stage: Annotated[
+        ProcessingStage | None,
+        Query(description="Stage to start from"),
+    ] = None,
 ):
     """Trigger reprocessing of a resource (admin only).
 
@@ -337,7 +346,7 @@ async def reprocess_resource(
     # Determine which stage to start from:
     # - If start_stage is explicitly provided, use that
     # - Otherwise, resume from the stage where it failed (if any)
-    effective_start_stage = start_stage
+    effective_start_stage = start_stage.value if start_stage else None
     if effective_start_stage is None and resource.processing_stage is not None:
         effective_start_stage = resource.processing_stage.value
 

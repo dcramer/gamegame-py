@@ -131,6 +131,16 @@ async def test_reprocess_resource(admin_client: AuthenticatedClient, resource: R
     assert data["status"] == "queued"
 
 
+@pytest.mark.asyncio
+async def test_reprocess_resource_invalid_stage(admin_client: AuthenticatedClient, resource: Resource):
+    """Invalid start_stage values should fail validation."""
+    response = await admin_client.post(
+        f"/api/resources/{resource.id}/reprocess",
+        params={"start_stage": "not-a-stage"},
+    )
+    assert response.status_code == 422
+
+
 # --- Upload Resource Tests ---
 
 
